@@ -8,89 +8,109 @@ from franka_msgs.msg import FrankaState
 import tf.transformations as tf
 import numpy as np
 import pickle
+from std_srvs.srv import Empty, EmptyResponse
+import os
+import datetime
 
 
 class data_saver:
     def __init__(self):
-        self.rgb_data_buffer=[]
-        self.pose_data_buffer=[]
-        self.wrench_data_buffer=[]
+        self.rgb_topic = rospy.get_param("~rgb_topic", "")
+        self.pose_topic = rospy.get_param("~pose_topic", "")
+        self.wrench_topic = rospy.get_param("~wrench_topic", "")
+        self.save_location = rospy.get_param("~save_location", "")
+        self.task_name = rospy.get_param("~task_name", "")
 
-        self.rgb_data=[]
-        self.pose_data=[]
-        self.wrench_data=[]
+        if self.rgb_topic == "" or \
+            self.pose_topic == "" or \
+            self.wrench_topic == "" or \
+            self.save_location == "" or \
+            self.task_name == "":
+            
+            rospy.logerr("One or more parameters are missing. Please set the parameters")
+            rospy.signal_shutdown("Missing parameters")
 
-    def add_new_rgb_data(self, rgb):
-        self.rgb_data_buffer.append(rgb)
-        
-    def add_new_pose_data(self,pose):
-        self.pose_data_buffer.append(pose)
+        # Construct actual save directory
+        self.task_save_path = os.path.join(self.save_location, self.task_name)
+        if not os.path.exists(self.task_save_path):
+            os.makedirs(self.task_save_path)
+            rospy.loginfo(f"Created directory: {self.task_save_path}")
 
-    def add_new_wrench_data(self,wrench):
-        self.wrench_data_buffer.append(wrench)
+        self.latest_rgb = None
+        self.latest_pose = None
+        self.latest_wrench = None
 
-    def create_data_point(self):
-        self.rgb_data.append(self.rgb_data_buffer[-1])
-        self.pose_data.append(self.pose_data_buffer[-1])
-        self.wrench_data.append(self.wrench_data_buffer[-1])
+        # Data storage buffers
+        self.rgb_data = []
+        self.pose_data = []
+        self.wrench_data = []
 
-    def save_data(self, file_path):
-        data = {"rgb_data": self.rgb_data, "pose_data": self.pose_data, "wrench_data": self.wrench_data}
+        self.recording = False
+
+        # Subscribers
+        rospy.Subscriber(self.pose_topic, FrankaState, self.end_effector_callback)
+        rospy.Subscriber(self.wrench_topic, WrenchStamped, self.force_sensor_callback)
+        rospy.Subscriber(self.rgb_topic, Image, self.camera_callback)
+
+        # Services for start/stop recording
+        rospy.Service('/start_recording', Empty, self.start_recording)
+        rospy.Service('/stop_recording', Empty, self.stop_recording)
+
+        # Timer for periodic data collection (30Hz)
+        rospy.Timer(rospy.Duration(1.0 / 30), self.timer_callback)
+
+    def start_recording(self, req):
+        self.recording = True
+        self.rgb_data = []
+        self.pose_data = []
+        self.wrench_data = []
+        rospy.loginfo("Started recording data.")
+        return EmptyResponse()
+
+    def stop_recording(self, req):
+        """Service callback to stop recording and save data"""
+        self.recording = False
+        data = {
+            "rgb_data": self.rgb_data,
+            "pose_data": self.pose_data,
+            "wrench_data": self.wrench_data
+        }
+
+        # Generate timestamped file name
+        timestamp = datetime.now().strftime("%m%d%y_%H%M%S")  # Format: MMDDYY_HHMMSS
+        file_path = os.path.join(self.task_save_path, f"{timestamp}.pkl")
+
         with open(file_path, "wb") as file:
             pickle.dump(data, file)
-        print(f"Data saved to {file_path}")
 
+        rospy.loginfo(f"Recording stopped. Data saved to {file_path}")
+        return EmptyResponse()
+    
+    def timer_callback(self, event):
+        if self.recording and self.latest_rgb is not None and self.latest_pose is not None and self.latest_wrench is not None:
+            self.rgb_data.append(self.latest_rgb)
+            self.pose_data.append(self.latest_pose)
+            self.wrench_data.append(self.latest_wrench)
 
-    # Callback to process Franka state and publish force, torque, and pose
     def end_effector_callback(self, eef_msg):
+        self.latest_pose = np.array([
+            eef_msg.position.x, eef_msg.position.y, eef_msg.position.z,
+            eef_msg.orientation.x, eef_msg.orientation.y, eef_msg.orientation.z, eef_msg.orientation.w
+        ])
 
-        eef_pose = np.zeros(7)
+    def force_sensor_callback(self, ft_msg):
+        self.latest_wrench = np.array([
+            ft_msg.wrench.force.x, ft_msg.wrench.force.y, ft_msg.wrench.force.z,
+            ft_msg.wrench.torque.x, ft_msg.wrench.torque.y, ft_msg.wrench.torque.z
+        ])
 
-        # Extract end-effector pose
-        eef_pose[0] = eef_msg.position.x 
-        eef_pose[1] = eef_msg.position.y
-        eef_pose[2] = eef_msg.position.z
-
-        # Extract quaternion from the Pose message
-        eef_pose[3] = eef_msg.orientation.x
-        eef_pose[4] = eef_msg.orientation.y
-        eef_pose[5] = eef_msg.orientation.z
-        eef_pose[6] = eef_msg.orientation.w
-
-        self.add_new_pose_data(eef_pose)
-
-        
-
-    def force_sensor_callback(self,ft_msg):
-        # Extract force and torque data
-        wrench_data = np.zeros(6)
-
-        wrench_data[0]=ft_msg.wrench.force.x
-        wrench_data[1]=ft_msg.wrench.force.y
-        wrench_data[2]=ft_msg.wrench.force.z
-        wrench_data[3]=ft_msg.wrench.force.x
-        wrench_data[4]=ft_msg.wrench.force.y
-        wrench_data[5]=ft_msg.wrench.force.z
-
-        self.add_new_wrench_data(wrench_data)
-
-
-    def camera_callback(self,rgb_msg):
-        self.add_new_rgb_data(rgb_msg)
-        pass
-
-
+    def camera_callback(self, rgb_msg):
+        self.latest_rgb = rgb_msg  # Store the latest image message directly
 
 # Main function
 def main():
     rospy.init_node('data_collector')
     data = data_saver()
-
-    # Subscribers
-    rospy.Subscriber('/franka_state_controller/franka_states', FrankaState, data.end_effector_callback)
-    rospy.Subscriber('/franka_state_controller/franka_states', FrankaState, data.force_sensor_callback)
-    rospy.Subscriber('/camera/rgb', Image, data.camera_callback)
-
 
     loop_rate = rospy.Rate(30)
     while not rospy.is_shutdown():
@@ -99,5 +119,4 @@ def main():
     
     
 if __name__ == '__main__':
-    
     main()
