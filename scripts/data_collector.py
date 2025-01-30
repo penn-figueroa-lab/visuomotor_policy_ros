@@ -3,14 +3,15 @@
 import rospy
 from geometry_msgs.msg import WrenchStamped
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Pose
-from franka_msgs.msg import FrankaState
+from geometry_msgs.msg import Pose, PointStamped
 import tf.transformations as tf
 import numpy as np
 import pickle
 from std_srvs.srv import Empty, EmptyResponse
 import os
 import datetime
+import cv2
+from cv_bridge import CvBridge
 
 
 class data_saver:
@@ -36,6 +37,8 @@ class data_saver:
             os.makedirs(self.task_save_path)
             rospy.loginfo(f"Created directory: {self.task_save_path}")
 
+        self.bridge = CvBridge()
+
         self.latest_rgb = None
         self.latest_pose = None
         self.latest_wrench = None
@@ -48,7 +51,7 @@ class data_saver:
         self.recording = False
 
         # Subscribers
-        rospy.Subscriber(self.pose_topic, FrankaState, self.end_effector_callback)
+        rospy.Subscriber(self.pose_topic, Pose, self.end_effector_callback)
         rospy.Subscriber(self.wrench_topic, WrenchStamped, self.force_sensor_callback)
         rospy.Subscriber(self.rgb_topic, Image, self.camera_callback)
 
@@ -77,7 +80,7 @@ class data_saver:
         }
 
         # Generate timestamped file name
-        timestamp = datetime.now().strftime("%m%d%y_%H%M%S")  # Format: MMDDYY_HHMMSS
+        timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M%S")  # Format: MMDDYY_HHMMSS
         file_path = os.path.join(self.task_save_path, f"{timestamp}.pkl")
 
         with open(file_path, "wb") as file:
@@ -87,10 +90,24 @@ class data_saver:
         return EmptyResponse()
     
     def timer_callback(self, event):
-        if self.recording and self.latest_rgb is not None and self.latest_pose is not None and self.latest_wrench is not None:
+
+        if self.latest_rgb is None:
+            rospy.logwarn(f"Missing rgb data")
+            return
+        if self.latest_pose is None:
+            rospy.logwarn(f"Missing pose data")
+            return
+        if self.latest_wrench is None:
+            rospy.logwarn(f"Missing wrench data")
+            return
+        
+        # If all data is available, record it
+        if self.recording:
             self.rgb_data.append(self.latest_rgb)
             self.pose_data.append(self.latest_pose)
             self.wrench_data.append(self.latest_wrench)
+        else:
+            rospy.logwarn(f"Standby... ready to start recording")
 
     def end_effector_callback(self, eef_msg):
         self.latest_pose = np.array([
@@ -105,7 +122,11 @@ class data_saver:
         ])
 
     def camera_callback(self, rgb_msg):
-        self.latest_rgb = rgb_msg  # Store the latest image message directly
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
+            self.latest_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            rospy.logerr(f"Failed to convert image: {e}")
 
 # Main function
 def main():
@@ -114,7 +135,6 @@ def main():
 
     loop_rate = rospy.Rate(30)
     while not rospy.is_shutdown():
-        data.create_data_point()
         loop_rate.sleep()
     
     

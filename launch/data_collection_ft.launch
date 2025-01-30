@@ -1,0 +1,54 @@
+<!-- <launch>
+  <param name="rgb_topic" value="/camera/rgb" />
+  <param name="pose_topic" value="/franka_state_controller/franka_states" />
+  <param name="wrench_topic" value="/franka_state_controller/franka_states" />
+
+  <param name="save_location" value="/tmp/recorded_data" />
+  <param name="task_name" value="default_task" />
+
+  <node pkg="franka_camera_data_collector" type="camera_publisher" name="camera_publisher" output="screen" />
+  <node pkg="franka_camera_data_collector" type="data_collector.py" name="data_collector" output="screen">
+    <param name="rgb_topic" value="$(arg rgb_topic)" />
+    <param name="pose_topic" value="$(arg pose_topic)" />
+    <param name="wrench_topic" value="$(arg wrench_topic)" />
+    <param name="save_location" value="$(arg save_location)" />
+    <param name="task_name" value="$(arg task_name)" />
+  </node>
+  
+</launch> -->
+
+<launch>
+  <!-- Define arguments -->
+  <arg name="rgb_topic" default="/camera/color/image_raw" />
+  <arg name="pose_topic" default="/franka_state_controller/ee_pose" />
+  <arg name="wrench_topic" default="/robotiq_force_torque_wrench_filtered" />
+  <arg name="save_location" default="/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros/data" />
+  <arg name="task_name" default="default_task" />
+
+  <!-- Set parameters using arguments -->
+  <param name="rgb_topic" value="$(arg rgb_topic)" />
+  <param name="pose_topic" value="$(arg pose_topic)" />
+  <param name="wrench_topic" value="$(arg wrench_topic)" />
+  <param name="save_location" value="$(arg save_location)" />
+  <param name="task_name" value="$(arg task_name)" />
+
+  <!-- Nodes -->
+  <!-- Camera Node launch -->
+  <include file="$(find realsense2_camera)/launch/rs_camera.launch" />
+
+  <!-- Force sensor Node launch -->
+  <node pkg="robotiq_force_torque_sensor_custom" type="rq_sensor_custom" name="rq_sensor_custom" output="screen" />
+  <node pkg="robotiq_force_torque_sensor_custom" type="rq_stream_sensor_custom" name="rq_stream_sensor_custom" output="screen" />
+  
+  <!-- Franka Node launch -->
+  <!-- <include file="$(find realsense2_camera)/launch/rs_camera.launch" /> -->
+  <!-- <node pkg="visuomotor_policy_ros" type="camera_publisher" name="camera_publisher" output="screen" /> -->
+  <node pkg="visuomotor_policy_ros" type="data_collector.py" name="data_collector" output="screen">
+    <param name="rgb_topic" value="$(arg rgb_topic)" />
+    <param name="pose_topic" value="$(arg pose_topic)" />
+    <param name="wrench_topic" value="$(arg wrench_topic)" />
+    <param name="save_location" value="$(arg save_location)" />
+    <param name="task_name" value="$(arg task_name)" />
+  </node>
+  
+</launch>
