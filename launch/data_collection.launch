@@ -1,0 +1,4 @@
+<launch>
+  <node pkg="franka_camera_data_collector" type="camera_publisher" name="camera_publisher" output="screen" />
+  <node pkg="franka_camera_data_collector" type="data_collector.py" name="data_collector" output="screen" />
+</launch>
