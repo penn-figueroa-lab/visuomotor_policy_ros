@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 from datetime import datetime
+import rospy
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge  # Added for ROS Image conversion
 
 class GoProConfig:
     def __init__(self, device_name, frame_width, frame_height, fps, crop_rows=None, crop_cols=None):
@@ -18,6 +21,7 @@ class GoPro:
         self.image = None
         self.image_cropped = None
         self.time0 = None
+        self.bridge = CvBridge()  # Initialize CvBridge
 
     def initialize(self, time0, config: GoProConfig):
         """
@@ -46,57 +50,54 @@ class GoPro:
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.frame_height)
         self.cap.set(cv2.CAP_PROP_FPS, config.fps)
 
+        # Image Publisher
+        self.pub = rospy.Publisher('/camera/color/image_raw', Image, queue_size=10)
+
         # Test reading one frame
         print("Test reading a frame")
         ret, self.image = self.cap.read()
         if not ret or self.image is None:
             print("\033[1;31mTest reading failed\033[0m")
-            print("  Possibility one: GoPro is not connected.")
-            print("  Possibility two: Need to reset USB device.")
-            print("    To do so, run 'lsusb | grep Elgato', which should give something like")
-            print("      Bus 010 Device 005: ID 0fd9:008a Elgato Systems GmbH Elgato HD60 X")
-            print("    Then run 'sudo ./USBRESET /dev/bus/usb/010/005'.")
             return False
 
         print("[GoPro] Pipeline started.")
         return True
+    
+    def publish_frames(self):
+        """Continuously capture frames and publish them as ROS Image messages."""
+        rate = rospy.Rate(self.config.fps)  # Use ROS rate to control FPS
+        while not rospy.is_shutdown():
+            ret, frame = self.cap.read()
+            if not ret:
+                rospy.logwarn("Failed to capture frame!")
+                break
 
-    def next_rgb_frame_blocking(self):
-        """
-        Capture the next RGB frame from the GoPro camera.
+            # Convert OpenCV image to ROS Image message
+            ros_image = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
 
-        Returns:
-            np.ndarray: The captured frame (cropped if configured), or an empty frame if no frame is detected.
-        """
-        ret, self.image = self.cap.read()
-        if not ret or self.image is None:
-            print("[GoPro] Empty frame. Terminate")
-            return np.array([])
+            # Publish the image
+            self.pub.publish(ros_image)
 
-        if self.config.crop_rows[0] >= 0 and self.config.crop_cols[0] >= 0:
-            self.image_cropped = self.image[
-                self.config.crop_rows[0]:self.config.crop_rows[1],
-                self.config.crop_cols[0]:self.config.crop_cols[1],
-            ]
-            return self.image_cropped
-        else:
-            return self.image
+            # Show the frame (optional for debugging)
+            cv2.imshow("Publishing Image", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
-    def __del__(self):
-        if self.cap:
-            self.cap.release()
-        print("[GoPro] Finishing..")
+            rate.sleep()
+
+        self.cap.release()
+        cv2.destroyAllWindows()
 
 # Example usage
-def main():
+def run():
+    rospy.init_node("image_publisher", anonymous=True)  # Initialize ROS node
+
     # Define GoPro configuration
     config = GoProConfig(
         device_name="/dev/video0",  # Adjust this to your device
         frame_width=1920,
         frame_height=1080,
         fps=30,
-        crop_rows=[100, 800],
-        crop_cols=[200, 1200],
     )
 
     # Initialize GoPro
@@ -107,22 +108,7 @@ def main():
         return
 
     # Capture frames in a loop
-    try:
-        while True:
-            frame = gopro.next_rgb_frame_blocking()
-            if frame.size == 0:
-                break
-
-            # Display the frame
-            cv2.imshow("GoPro Frame", frame)
-
-            # Exit on 'q' key
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    except KeyboardInterrupt:
-        print("Exiting...")
-    finally:
-        cv2.destroyAllWindows()
+    gopro.publish_frames()
 
 if __name__ == "__main__":
-    main()
+    run()

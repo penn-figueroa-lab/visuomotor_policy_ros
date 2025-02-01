@@ -23,6 +23,10 @@ expert_data_path = "/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros
 save_data_path = "/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros/data/default_task_dataset"
 demo_dirs = [f for f in os.listdir(expert_data_path) if f.endswith(".pkl")]
 
+image_arrays = []
+pose_arrays = []
+wrench_arrays = []
+
 
 if os.path.exists(save_data_path):
     cprint('Data already exists at {}'.format(save_data_path), 'red')
@@ -37,6 +41,15 @@ if os.path.exists(save_data_path):
         exit()
 os.makedirs(save_data_path, exist_ok=True)
 
+def preprocess_pose_data(pose):
+    pass
+
+def preprocess_rgb_data(image):
+    pass
+
+def preprocess_wrench_data(wrench):
+    pass
+
 
 for demo in demo_dirs:
     demo_file = os.path.join(expert_data_path, demo)
@@ -44,4 +57,15 @@ for demo in demo_dirs:
 
     with open(demo_file, 'rb') as f:
         demo = pickle.load(f)
+
+    demo_length = len(demo['rgb_data'])
+    
+    for index in range(demo_length):
+        obs_image = demo['rgb_data'][index]
+        pose_data = demo['pose_data'][index]
+        wrench_data = demo['wrench_data'][index]
+
+
+
+
 
