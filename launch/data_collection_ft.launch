@@ -34,7 +34,8 @@
 
   <!-- Nodes -->
   <!-- Camera Node launch -->
-  <include file="$(find realsense2_camera)/launch/rs_camera.launch" />
+  <!-- <include file="$(find realsense2_camera)/launch/rs_camera.launch" /> -->
+  <node pkg="visuomotor_policy_ros" type="gopro.py" name="gopro" output="screen" />
 
   <!-- Force sensor Node launch -->
   <node pkg="robotiq_force_torque_sensor_custom" type="rq_sensor_custom" name="rq_sensor_custom" output="screen" />

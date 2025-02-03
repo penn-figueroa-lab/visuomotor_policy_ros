@@ -12,7 +12,7 @@ import os
 import datetime
 import cv2
 from cv_bridge import CvBridge
-
+import time
 
 class data_saver:
     def __init__(self):
@@ -47,6 +47,7 @@ class data_saver:
         self.rgb_data = []
         self.pose_data = []
         self.wrench_data = []
+        self.time_data = []
 
         self.recording = False
 
@@ -62,11 +63,16 @@ class data_saver:
         # Timer for periodic data collection (30Hz)
         rospy.Timer(rospy.Duration(1.0 / 30), self.timer_callback)
 
+        # Initialize episode number
+        if not rospy.has_param('/episode_num'):
+            rospy.set_param('/episode_num',0)
+
     def start_recording(self, req):
         self.recording = True
         self.rgb_data = []
         self.pose_data = []
         self.wrench_data = []
+        self.time_data = []
         rospy.loginfo("Started recording data.")
         return EmptyResponse()
 
@@ -76,18 +82,22 @@ class data_saver:
         data = {
             "rgb_data": self.rgb_data,
             "pose_data": self.pose_data,
-            "wrench_data": self.wrench_data
+            "wrench_data": self.wrench_data,
+            "time_data": self.time_data
         }
 
         # Generate timestamped file name
-        timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M%S")  # Format: MMDDYY_HHMMSS
-        file_path = os.path.join(self.task_save_path, f"{timestamp}.pkl")
+        episode_num = rospy.get_param('/episode_num')
+        # timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M%S")  # Format: MMDDYY_HHMMSS
+        file_path = os.path.join(self.task_save_path, f"wipe_episode_{episode_num}.pkl")
+        rospy.set_param('/episode_num',episode_num+1)
 
         with open(file_path, "wb") as file:
             pickle.dump(data, file)
 
         rospy.loginfo(f"Recording stopped. Data saved to {file_path}")
         return EmptyResponse()
+    
     
     def timer_callback(self, event):
 
@@ -106,6 +116,7 @@ class data_saver:
             self.rgb_data.append(self.latest_rgb)
             self.pose_data.append(self.latest_pose)
             self.wrench_data.append(self.latest_wrench)
+            self.time_data.append(time.time())
         else:
             rospy.logwarn(f"Standby... ready to start recording")
 
