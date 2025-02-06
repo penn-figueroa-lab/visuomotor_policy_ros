@@ -112,6 +112,7 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     #             if not f.result():
     #                 raise RuntimeError("Failed to read image!")
     
+    
                 
 
     # read low dim data
