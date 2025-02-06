@@ -11,6 +11,7 @@ import re
 import time
 from cv_bridge import CvBridge
 import pathlib
+import pandas as pd
 
 import numpy as np
 import torch
@@ -71,41 +72,47 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     episode_id = episode_name[13:]
     print(f"episode_name: {episode_name}, episode_id: {episode_id}")
     episode_dir = input_dir.joinpath(episode_name)
+    with open(episode_dir, 'rb') as f:
+        episode_data = pickle.load(f)
 
     # read rgb
     data_rgb = []
     data_rgb_time_stamps = []
     rgb_data_shapes = []
-    for id in id_list:
-        rgb_dir = episode_dir.joinpath("rgb_" + str(id))
-        rgb_file_list = os.listdir(rgb_dir)
-        rgb_file_list.sort()  # important!
-        num_raw_images = len(rgb_file_list)
-        img = cv2.imread(str(rgb_dir.joinpath(rgb_file_list[0])))
+    
+    # for id in id_list:
+    #     rgb_dir = episode_dir.joinpath("rgb_" + str(id))
+    #     rgb_file_list = os.listdir(rgb_dir)
+    #     rgb_file_list.sort()  # important!
+    #     rgb_file_list = episode_data['rgb_data']
+    #     num_raw_images = len(rgb_file_list)
+    #     img = cv2.imread(str(rgb_dir.joinpath(rgb_file_list[0])))
 
-        rgb_data_shapes.append((num_raw_images, *img.shape))
-        data_rgb.append(np.zeros(rgb_data_shapes[id], dtype=np.uint8))
-        data_rgb_time_stamps.append(np.zeros(num_raw_images))
+    #     rgb_data_shapes.append((num_raw_images, *img.shape))
+    #     data_rgb.append(np.zeros(rgb_data_shapes[id], dtype=np.uint8))
+    #     data_rgb_time_stamps.append(np.zeros(num_raw_images))
 
-        print(f"Reading rgb data from: {rgb_dir}")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = set()
-            for i in range(len(rgb_file_list)):
-                futures.add(
-                    executor.submit(
-                        image_read,
-                        rgb_dir,
-                        rgb_file_list,
-                        i,
-                        data_rgb[id],
-                        data_rgb_time_stamps[id],
-                    )
-                )
+    #     print(f"Reading rgb data from: {rgb_dir}")
+    #     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    #         futures = set()
+    #         for i in range(len(rgb_file_list)):
+    #             futures.add(
+    #                 executor.submit(
+    #                     image_read,
+    #                     rgb_dir,
+    #                     rgb_file_list,
+    #                     i,
+    #                     data_rgb[id],
+    #                     data_rgb_time_stamps[id],
+    #                 )
+    #             )
 
-            completed, futures = concurrent.futures.wait(futures)
-            for f in completed:
-                if not f.result():
-                    raise RuntimeError("Failed to read image!")
+    #         completed, futures = concurrent.futures.wait(futures)
+    #         for f in completed:
+    #             if not f.result():
+    #                 raise RuntimeError("Failed to read image!")
+    
+                
 
     # read low dim data
     data_ts_pose_fb = []

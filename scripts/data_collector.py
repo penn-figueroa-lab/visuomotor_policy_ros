@@ -89,7 +89,7 @@ class data_saver:
         # Generate timestamped file name
         episode_num = rospy.get_param('/episode_num')
         # timestamp = datetime.datetime.now().strftime("%y%m%d_%H%M%S")  # Format: MMDDYY_HHMMSS
-        file_path = os.path.join(self.task_save_path, f"wipe_episode_{episode_num}.pkl")
+        file_path = os.path.join(self.task_save_path, f"episode_{episode_num}.pkl")
         rospy.set_param('/episode_num',episode_num+1)
 
         with open(file_path, "wb") as file:
