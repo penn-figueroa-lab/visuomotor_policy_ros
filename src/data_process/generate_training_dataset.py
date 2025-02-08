@@ -1,26 +1,21 @@
 import os
 import zarr
 import pickle
-import tqdm
 import numpy as np
-import torch
-# import pytorch3d.ops as torch3d_ops
-import torchvision
 from termcolor import cprint
-import re
-import time
 from cv_bridge import CvBridge
 import pathlib
 import pandas as pd
-
 import numpy as np
-import torch
-# import pytorch3d.ops as torch3d_ops
-import torchvision
-import socket
 import pickle
-import cv2
 import shutil
+
+from src.episode_data_buffer import (
+    VideoData,
+    EpisodeDataBuffer,
+)
+from PyriteUtility.planning_control.filtering import LiveLPFilter
+import concurrent.futures
 
 
 # check environment variables
@@ -45,7 +40,13 @@ wrench_timestamp_dir = output_dir.joinpath("wrench_timestamp")
 rgb_timestamp_dir = output_dir.joinpath("rgb_timestamp")
 
 
-''' 3. Read pkl Data '''
+''' 3. Robot Number Config '''
+# specify the input and output directories
+id_list = [0]  # single robot
+# id_list = [0, 1] # bimanual
+
+
+''' 4. Read pkl Data '''
 image_arrays = []
 pose_arrays = []
 wrench_arrays = []
@@ -61,15 +62,16 @@ root = zarr.open(store=store, mode="a")
 
 print("Reading data from input_dir: ", input_dir)
 demo_dirs = [f for f in os.listdir(input_dir) if f.endswith(".pkl")]
+episode_names = os.listdir(input_dir)
 
 
-''' 4. Data Processing'''
+''' 5. Data Processing Function'''
 def process_one_episode(root, episode_name, input_dir, id_list):
     if episode_name.startswith("."):
         return True
 
     # info about input
-    episode_id = episode_name[13:]
+    episode_id = episode_name[8:]
     print(f"episode_name: {episode_name}, episode_id: {episode_id}")
     episode_dir = input_dir.joinpath(episode_name)
     with open(episode_dir, 'rb') as f:
@@ -79,41 +81,13 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     data_rgb = []
     data_rgb_time_stamps = []
     rgb_data_shapes = []
-    
-    # for id in id_list:
-    #     rgb_dir = episode_dir.joinpath("rgb_" + str(id))
-    #     rgb_file_list = os.listdir(rgb_dir)
-    #     rgb_file_list.sort()  # important!
-    #     rgb_file_list = episode_data['rgb_data']
-    #     num_raw_images = len(rgb_file_list)
-    #     img = cv2.imread(str(rgb_dir.joinpath(rgb_file_list[0])))
 
-    #     rgb_data_shapes.append((num_raw_images, *img.shape))
-    #     data_rgb.append(np.zeros(rgb_data_shapes[id], dtype=np.uint8))
-    #     data_rgb_time_stamps.append(np.zeros(num_raw_images))
+    for id in id_list:
+        rgb_data_from_pkl = episode_data["rgb_data"]
+        rgb_timastamp_from_pkl = episode_data["rgb_timestamp"]
+        data_rgb.append(np.array(rgb_data_from_pkl))
+        data_rgb_time_stamps.append(np.array(rgb_timastamp_from_pkl))
 
-    #     print(f"Reading rgb data from: {rgb_dir}")
-    #     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-    #         futures = set()
-    #         for i in range(len(rgb_file_list)):
-    #             futures.add(
-    #                 executor.submit(
-    #                     image_read,
-    #                     rgb_dir,
-    #                     rgb_file_list,
-    #                     i,
-    #                     data_rgb[id],
-    #                     data_rgb_time_stamps[id],
-    #                 )
-    #             )
-
-    #         completed, futures = concurrent.futures.wait(futures)
-    #         for f in completed:
-    #             if not f.result():
-    #                 raise RuntimeError("Failed to read image!")
-    
-    
-                
 
     # read low dim data
     data_ts_pose_fb = []
@@ -122,16 +96,18 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     data_wrench_time_stamps = []
     print(f"Reading low dim data for : {episode_dir}")
     for id in id_list:
-        json_path = episode_dir.joinpath("robot_data_" + str(id) + ".json")
-        df_robot_data = pd.read_json(json_path)
-        data_robot_time_stamps.append(df_robot_data["robot_time_stamps"].to_numpy())
-        data_ts_pose_fb.append(np.vstack(df_robot_data["ts_pose_fb"]))
+        # read pose data
+        pose_data_from_pkl = episode_data["pose_data"]
+        pose_timestamp_from_pkl = episode_data["pose_timestamp"]
+        data_ts_pose_fb.append(np.array(pose_data_from_pkl))
+        data_robot_time_stamps.append(np.array(pose_timestamp_from_pkl))
 
         # read wrench data
-        json_path = episode_dir.joinpath("wrench_data_" + str(id) + ".json")
-        df_wrench_data = pd.read_json(json_path)
-        data_wrench_time_stamps.append(df_wrench_data["wrench_time_stamps"].to_numpy())
-        data_wrench.append(np.vstack(df_wrench_data["wrench"]))
+        wrench_data_from_pkl = episode_data["wrench_data"]
+        wrench_timestamp_from_pkl = episode_data["wrench_timestamp"]
+        data_wrench.append(np.array(wrench_data_from_pkl))
+        data_wrench_time_stamps.append(np.array(wrench_timestamp_from_pkl))
+        
 
     # get filtered force
     print(f"Computing filtered wrench for {episode_name}")
@@ -195,37 +171,61 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     return True
 
 
-def preprocess_pose_data(pose):
-    pass
 
-def preprocess_rgb_data(image):
-    pass
+''' 6. Data Processing and Save Data as zarr Database'''
 
-def preprocess_wrench_data(wrench):
-    pass
+with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
+    futures = [
+        executor.submit(
+            process_one_episode,
+            root,
+            episode_name,
+            input_dir,
+            id_list,
+        )
+        for episode_name in episode_names
+    ]
+    for future in concurrent.futures.as_completed(futures):
+        if not future.result():
+            raise RuntimeError("Multi-processing failed!")
 
+print("Finished reading. Now start generating metadata")
+from PyriteUtility.computer_vision.imagecodecs_numcodecs import register_codecs
 
-for demo in demo_dirs:
-    demo_file = os.path.join(input_dir, demo)
-    cprint('Processing {}'.format(demo), 'green')
+register_codecs()
+buffer = zarr.open(output_dir)
+meta = buffer.create_group("meta", overwrite=True)
+episode_robot_len = []
+episode_wrench_len = []
+episode_rgb_len = []
 
-    with open(demo_file, 'rb') as f:
-        demo = pickle.load(f)
+for id in id_list:
+    episode_robot_len.append([])
+    episode_wrench_len.append([])
+    episode_rgb_len.append([])
 
-    demo_length = len(demo['rgb_data'])
-    
-    for index in range(demo_length):
-        obs_image = demo['rgb_data'][index]
-        obs_image = cv2.cvtColor(obs_image, cv2.COLOR_BGR2RGB)
-        cv2.imshow("Gopro Image", obs_image)
-        key = cv2.waitKey(30)
-        if key == ord('q'):
-            break
-        pose_data = demo['pose_data'][index]
-        print(pose_data)
-        wrench_data = demo['wrench_data'][index]
-        print(wrench_data)
-    cv2.destroyAllWindows()
+count = 0
+for key in buffer["data"].keys():
+    episode = key
+    ep_data = buffer["data"][episode]
+
+    for id in id_list:
+        episode_robot_len[id].append(ep_data[f"ts_pose_fb_{id}"].shape[0])
+        episode_wrench_len[id].append(ep_data[f"wrench_{id}"].shape[0])
+        episode_rgb_len[id].append(ep_data[f"rgb_{id}"].shape[0])
+        print(
+            f"Number {count}: {episode}: id = {id}: robot len: {episode_robot_len[id][-1]}, wrench_len: {episode_wrench_len[id][-1]} rgb len: {episode_rgb_len[id][-1]}"
+        )
+    count += 1
+
+for id in id_list:
+    meta[f"episode_robot{id}_len"] = zarr.array(episode_robot_len[id])
+    meta[f"episode_wrench{id}_len"] = zarr.array(episode_wrench_len[id])
+    meta[f"episode_rgb{id}_len"] = zarr.array(episode_rgb_len[id])
+
+print(f"All done! Generated {count} episodes in {output_dir}")
+print("The only thing left is to run postprocess_add_virtual_target_label.py")
+
 
 
 

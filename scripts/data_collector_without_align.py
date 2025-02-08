@@ -3,7 +3,7 @@
 import rospy
 from geometry_msgs.msg import WrenchStamped
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Pose, PointStamped
+from geometry_msgs.msg import Pose, PointStamped, PoseStamped
 import tf.transformations as tf
 import numpy as np
 import pickle
@@ -61,7 +61,7 @@ class data_saver:
         rospy.Service('/stop_recording', Empty, self.stop_recording)
 
         # Timer for periodic data collection (30Hz)
-        rospy.Timer(rospy.Duration(1.0 / 30), self.timer_callback)
+        # rospy.Timer(rospy.Duration(1.0 / 30), self.timer_callback)
 
         # Initialize episode number
         if not rospy.has_param('/episode_num'):
@@ -70,9 +70,11 @@ class data_saver:
     def start_recording(self, req):
         self.recording = True
         self.rgb_data = []
+        self.rgb_timestamp = []
         self.pose_data = []
+        self.pose_timestamp = []
         self.wrench_data = []
-        self.time_data = []
+        self.wrench_timestamp = []
         rospy.loginfo("Started recording data.")
         return EmptyResponse()
 
@@ -81,9 +83,11 @@ class data_saver:
         self.recording = False
         data = {
             "rgb_data": self.rgb_data,
+            "rgb_timestamp":self.rgb_timestamp,
             "pose_data": self.pose_data,
+            "pose_timestamp":self.pose_timestamp,
             "wrench_data": self.wrench_data,
-            "time_data": self.time_data
+            "wrench_timestamp":self.wrench_timestamp
         }
 
         # Generate timestamped file name
@@ -121,21 +125,33 @@ class data_saver:
             rospy.logwarn(f"Standby... ready to start recording")
 
     def end_effector_callback(self, eef_msg):
-        self.latest_pose = np.array([
+        received_time = rospy.Time.now().to_sec()
+        # Use PoseStamped message for 
+        # publish_time = eef_msg.header.stamp.to_sec()
+        pose = np.array([
             eef_msg.position.x, eef_msg.position.y, eef_msg.position.z,
             eef_msg.orientation.x, eef_msg.orientation.y, eef_msg.orientation.z, eef_msg.orientation.w
         ])
+        self.pose_data.append(pose)
+        self.pose_timestamp.append(received_time)
+
 
     def force_sensor_callback(self, ft_msg):
-        self.latest_wrench = np.array([
+        wrench = np.array([
             ft_msg.wrench.force.x, ft_msg.wrench.force.y, ft_msg.wrench.force.z,
             ft_msg.wrench.torque.x, ft_msg.wrench.torque.y, ft_msg.wrench.torque.z
         ])
+        publish_time = ft_msg.header.stamp.to_sec() 
+        self.wrench_data.append(wrench)
+        self.wrench_timestamp.append(publish_time)
 
     def camera_callback(self, rgb_msg):
         try:
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
-            self.latest_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            publish_time = rgb_msg.header.stamp.to_sec() 
+            self.rgb_data.append(rgb)
+            self.rgb_timestamp.append(publish_time)
         except Exception as e:
             rospy.logerr(f"Failed to convert image: {e}")
 
@@ -144,7 +160,7 @@ def main():
     rospy.init_node('data_collector')
     data = data_saver()
 
-    loop_rate = rospy.Rate(30)
+    loop_rate = rospy.Rate(100)
     while not rospy.is_shutdown():
         loop_rate.sleep()
     
