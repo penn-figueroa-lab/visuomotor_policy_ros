@@ -20,7 +20,7 @@
 <launch>
   <!-- Define arguments -->
   <arg name="rgb_topic" default="/camera/color/image_raw" />
-  <arg name="pose_topic" default="/franka_state_controller/ee_pose" />
+  <arg name="pose_topic" default="/franka_state_controller/O_T_EE" />
   <arg name="wrench_topic" default="/robotiq_force_torque_wrench_filtered" />
   <arg name="save_location" default="/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros/data" />
   <arg name="task_name" default="default_task_expert" />
@@ -44,7 +44,7 @@
   <!-- Franka Node launch -->
   <!-- <include file="$(find realsense2_camera)/launch/rs_camera.launch" /> -->
   <!-- <node pkg="visuomotor_policy_ros" type="camera_publisher" name="camera_publisher" output="screen" /> -->
-  <node pkg="visuomotor_policy_ros" type="data_collector.py" name="data_collector" output="screen">
+  <node pkg="visuomotor_policy_ros" type="data_collector_without_align.py" name="data_collector" output="screen">
     <param name="rgb_topic" value="$(arg rgb_topic)" />
     <param name="pose_topic" value="$(arg pose_topic)" />
     <param name="wrench_topic" value="$(arg wrench_topic)" />

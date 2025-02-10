@@ -45,14 +45,16 @@ class data_saver:
 
         # Data storage buffers
         self.rgb_data = []
+        self.rgb_timestamp = []
         self.pose_data = []
+        self.pose_timestamp = []
         self.wrench_data = []
-        self.time_data = []
+        self.wrench_timestamp = []
 
         self.recording = False
 
         # Subscribers
-        rospy.Subscriber(self.pose_topic, Pose, self.end_effector_callback)
+        rospy.Subscriber(self.pose_topic, PoseStamped, self.end_effector_callback)
         rospy.Subscriber(self.wrench_topic, WrenchStamped, self.force_sensor_callback)
         rospy.Subscriber(self.rgb_topic, Image, self.camera_callback)
 
@@ -125,15 +127,15 @@ class data_saver:
             rospy.logwarn(f"Standby... ready to start recording")
 
     def end_effector_callback(self, eef_msg):
-        received_time = rospy.Time.now().to_sec()
+        # received_time = rospy.Time.now().to_sec()
         # Use PoseStamped message for 
-        # publish_time = eef_msg.header.stamp.to_sec()
+        publish_time = eef_msg.header.stamp.to_sec()
         pose = np.array([
-            eef_msg.position.x, eef_msg.position.y, eef_msg.position.z,
-            eef_msg.orientation.x, eef_msg.orientation.y, eef_msg.orientation.z, eef_msg.orientation.w
+            eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
+            eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
         ])
         self.pose_data.append(pose)
-        self.pose_timestamp.append(received_time)
+        self.pose_timestamp.append(publish_time)
 
 
     def force_sensor_callback(self, ft_msg):
@@ -157,7 +159,7 @@ class data_saver:
 
 # Main function
 def main():
-    rospy.init_node('data_collector')
+    rospy.init_node('data_collector_without_align')
     data = data_saver()
 
     loop_rate = rospy.Rate(100)
