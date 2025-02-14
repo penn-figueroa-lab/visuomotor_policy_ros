@@ -3,14 +3,18 @@ import zarr
 import pickle
 import numpy as np
 from termcolor import cprint
-from cv_bridge import CvBridge
 import pathlib
 import pandas as pd
 import numpy as np
 import pickle
 import shutil
+import cv2
+import re
+import sys
+sys.path.append("/home/yihan/Documents/adaptive_compliance_policy")
 
-from src.episode_data_buffer import (
+
+from PyriteUtility.data_pipeline.episode_data_buffer import (
     VideoData,
     EpisodeDataBuffer,
 )
@@ -21,12 +25,12 @@ import concurrent.futures
 # check environment variables
 
 ''' 1. Input Data Path Setting'''
-# if "PYRITE_RAW_DATASET_FOLDERS" not in os.environ:
-#     raise ValueError("Please set the environment variable PYRITE_RAW_DATASET_FOLDERS")
-# input_dir = pathlib.Path(
-#     os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/flip_up_new_v5"
-# )
-input_dir = "/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros/data/default_task_expert"
+if "PYRITE_RAW_DATASET_FOLDERS" not in os.environ:
+    raise ValueError("Please set the environment variable PYRITE_RAW_DATASET_FOLDERS")
+input_dir = pathlib.Path(
+    os.environ.get("PYRITE_RAW_DATASET_FOLDERS") + "/swipe_board"
+)
+# input_dir = "/home/yihan/Documents/ft_sensor_ws/src/visuomotor_policy_ros/data/default_task_expert"
 
 
 ''' 2. Output Data Path Setting'''
@@ -50,7 +54,7 @@ id_list = [0]  # single robot
 image_arrays = []
 pose_arrays = []
 wrench_arrays = []
-bridge = CvBridge()
+
 
 # clean and create output folders
 if os.path.exists(output_dir):
@@ -71,7 +75,10 @@ def process_one_episode(root, episode_name, input_dir, id_list):
         return True
 
     # info about input
-    episode_id = episode_name[8:]
+    
+    # episode_id = episode_name[8:]
+    match = re.search(r'\d+', episode_name)
+    episode_id = match.group()
     print(f"episode_name: {episode_name}, episode_id: {episode_id}")
     episode_dir = input_dir.joinpath(episode_name)
     with open(episode_dir, 'rb') as f:
@@ -83,10 +90,16 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     rgb_data_shapes = []
 
     for id in id_list:
-        rgb_data_from_pkl = episode_data["rgb_data"]
-        rgb_timastamp_from_pkl = episode_data["rgb_timestamp"]
-        data_rgb.append(np.array(rgb_data_from_pkl))
-        data_rgb_time_stamps.append(np.array(rgb_timastamp_from_pkl))
+        rgb_data_with_time_from_pkl = episode_data["rgb_data_with_timestamp"]
+        rgb_timastamp = np.array([tup[0] for tup in rgb_data_with_time_from_pkl])
+        rgb_timastamp = rgb_timastamp/1e6
+        rgb_data = np.array([tup[1] for tup in rgb_data_with_time_from_pkl]).astype(np.uint8)
+        rgb_length = len(rgb_data)
+        img = rgb_data[0]
+        rgb_data_shapes.append((rgb_length,*img.shape))
+
+        data_rgb.append(rgb_data)
+        data_rgb_time_stamps.append(rgb_timastamp)
 
 
     # read low dim data
@@ -97,16 +110,23 @@ def process_one_episode(root, episode_name, input_dir, id_list):
     print(f"Reading low dim data for : {episode_dir}")
     for id in id_list:
         # read pose data
-        pose_data_from_pkl = episode_data["pose_data"]
-        pose_timestamp_from_pkl = episode_data["pose_timestamp"]
-        data_ts_pose_fb.append(np.array(pose_data_from_pkl))
-        data_robot_time_stamps.append(np.array(pose_timestamp_from_pkl))
+        pose_data_with_time_from_pkl = episode_data["pose_data_with_timestamp"]
+        pose_timestamp = np.array([tup[0] for tup in pose_data_with_time_from_pkl])
+        pose_timestamp = pose_timestamp/1e6
+        pose_data = np.array([tup[1] for tup in pose_data_with_time_from_pkl])
+        print("pose_timestamp: ",len(pose_timestamp))
+        print("pose_data shape: ",pose_data.shape)
+        data_ts_pose_fb.append(pose_data)
+        data_robot_time_stamps.append(pose_timestamp)
 
         # read wrench data
-        wrench_data_from_pkl = episode_data["wrench_data"]
-        wrench_timestamp_from_pkl = episode_data["wrench_timestamp"]
-        data_wrench.append(np.array(wrench_data_from_pkl))
-        data_wrench_time_stamps.append(np.array(wrench_timestamp_from_pkl))
+        wrench_data_with_time_from_pkl = episode_data["wrench_data_with_timestamp"]
+        wrench_timestamp = np.array([tup[0] for tup in wrench_data_with_time_from_pkl])
+        wrench_timestamp = wrench_timestamp/1e6
+        wrench_data = np.array([tup[1] for tup in wrench_data_with_time_from_pkl])
+        print("wrench_data shape: ",wrench_data.shape)
+        data_wrench.append(wrench_data)
+        data_wrench_time_stamps.append(wrench_timestamp)
         
 
     # get filtered force
@@ -137,6 +157,9 @@ def process_one_episode(root, episode_name, input_dir, id_list):
         data_rgb_time_stamps[id] -= time_offset
         data_robot_time_stamps[id] -= time_offset
         data_wrench_time_stamps[id] -= time_offset
+    print("data_rgb_time_stamps0: ",data_rgb_time_stamps[id][0])
+    print("data_robot_time_stamps0: ",data_robot_time_stamps[id][0])
+    print("data_wrench_time_stamps0: ",data_wrench_time_stamps[id][0])
 
     # create output zarr
     print(f"Saving everything to : {output_dir}")
@@ -174,7 +197,7 @@ def process_one_episode(root, episode_name, input_dir, id_list):
 
 ''' 6. Data Processing and Save Data as zarr Database'''
 
-with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
+with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
     futures = [
         executor.submit(
             process_one_episode,
@@ -225,8 +248,3 @@ for id in id_list:
 
 print(f"All done! Generated {count} episodes in {output_dir}")
 print("The only thing left is to run postprocess_add_virtual_target_label.py")
-
-
-
-
-

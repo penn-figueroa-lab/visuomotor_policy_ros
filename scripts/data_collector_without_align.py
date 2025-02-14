@@ -39,17 +39,17 @@ class data_saver:
 
         self.bridge = CvBridge()
 
-        self.latest_rgb = None
-        self.latest_pose = None
-        self.latest_wrench = None
+        self.init_rgb = None
+        self.init_pose = None
+        self.init_wrench = None
 
         # Data storage buffers
-        self.rgb_data = []
-        self.rgb_timestamp = []
-        self.pose_data = []
-        self.pose_timestamp = []
-        self.wrench_data = []
-        self.wrench_timestamp = []
+        self.rgb_data_with_timestamp = []
+        # self.rgb_timestamp = []
+        self.pose_data_with_timestamp = []
+        # self.pose_timestamp = []
+        self.wrench_data_with_timestamp = []
+        # self.wrench_timestamp = []
 
         self.recording = False
 
@@ -71,12 +71,12 @@ class data_saver:
 
     def start_recording(self, req):
         self.recording = True
-        self.rgb_data = []
-        self.rgb_timestamp = []
-        self.pose_data = []
-        self.pose_timestamp = []
-        self.wrench_data = []
-        self.wrench_timestamp = []
+        self.rgb_data_with_timestamp = []
+        # self.rgb_timestamp = []
+        self.pose_data_with_timestamp = []
+        # self.pose_timestamp = []
+        self.wrench_data_with_timestamp = []
+        # self.wrench_timestamp = []
         rospy.loginfo("Started recording data.")
         return EmptyResponse()
 
@@ -84,12 +84,9 @@ class data_saver:
         """Service callback to stop recording and save data"""
         self.recording = False
         data = {
-            "rgb_data": self.rgb_data,
-            "rgb_timestamp":self.rgb_timestamp,
-            "pose_data": self.pose_data,
-            "pose_timestamp":self.pose_timestamp,
-            "wrench_data": self.wrench_data,
-            "wrench_timestamp":self.wrench_timestamp
+            "rgb_data_with_timestamp": self.rgb_data_with_timestamp,
+            "pose_data_with_timestamp":self.pose_data_with_timestamp,
+            "wrench_data_with_timestamp": self.wrench_data_with_timestamp
         }
 
         # Generate timestamped file name
@@ -105,55 +102,67 @@ class data_saver:
         return EmptyResponse()
     
     
-    def timer_callback(self, event):
+    # def timer_callback(self, event):
 
-        if self.latest_rgb is None:
-            rospy.logwarn(f"Missing rgb data")
-            return
-        if self.latest_pose is None:
-            rospy.logwarn(f"Missing pose data")
-            return
-        if self.latest_wrench is None:
-            rospy.logwarn(f"Missing wrench data")
-            return
+    #     if self.latest_rgb is None:
+    #         rospy.logwarn(f"Missing rgb data")
+    #         return
+    #     if self.latest_pose is None:
+    #         rospy.logwarn(f"Missing pose data")
+    #         return
+    #     if self.latest_wrench is None:
+    #         rospy.logwarn(f"Missing wrench data")
+    #         return
         
-        # If all data is available, record it
-        if self.recording:
-            self.rgb_data.append(self.latest_rgb)
-            self.pose_data.append(self.latest_pose)
-            self.wrench_data.append(self.latest_wrench)
-            self.time_data.append(time.time())
-        else:
-            rospy.logwarn(f"Standby... ready to start recording")
+    #     # If all data is available, record it
+    #     if self.recording:
+    #         self.rgb_data.append(self.latest_rgb)
+    #         self.pose_data.append(self.latest_pose)
+    #         self.wrench_data.append(self.latest_wrench)
+    #         self.time_data.append(time.time())
+    #     else:
+    #         rospy.logwarn(f"Standby... ready to start recording")
 
     def end_effector_callback(self, eef_msg):
-        # received_time = rospy.Time.now().to_sec()
         # Use PoseStamped message for 
-        publish_time = eef_msg.header.stamp.to_sec()
+        # publish_time = eef_msg.header.stamp.to_sec()
+        received_time = rospy.Time.now().to_nsec()
         pose = np.array([
             eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
             eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
         ])
-        self.pose_data.append(pose)
-        self.pose_timestamp.append(publish_time)
+        self.pose_data_with_timestamp.append((received_time,pose))
+        self.init_pose = pose
+        if self.init_pose is None:
+            rospy.logwarn(f"Missing pose data")
+        # self.pose_timestamp.append(publish_time)
 
 
     def force_sensor_callback(self, ft_msg):
+        # publish_time = ft_msg.header.stamp.to_sec() 
+        received_time = rospy.Time.now().to_nsec()
         wrench = np.array([
             ft_msg.wrench.force.x, ft_msg.wrench.force.y, ft_msg.wrench.force.z,
             ft_msg.wrench.torque.x, ft_msg.wrench.torque.y, ft_msg.wrench.torque.z
         ])
-        publish_time = ft_msg.header.stamp.to_sec() 
-        self.wrench_data.append(wrench)
-        self.wrench_timestamp.append(publish_time)
+        self.wrench_data_with_timestamp.append((received_time,wrench))
+        self.init_wrench = wrench
+        if self.init_wrench is None:
+            rospy.logwarn(f"Missing wrench data")
+
+        # self.wrench_timestamp.append(publish_time)
 
     def camera_callback(self, rgb_msg):
         try:
+            received_time = rospy.Time.now().to_nsec()
+            # publish_time = rgb_msg.header.stamp.to_sec() 
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
             rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            publish_time = rgb_msg.header.stamp.to_sec() 
-            self.rgb_data.append(rgb)
-            self.rgb_timestamp.append(publish_time)
+            self.rgb_data_with_timestamp.append((received_time,rgb))
+            self.init_rgb = rgb
+            if self.init_rgb is None:
+                rospy.logwarn(f"Missing rgb data")
+            # self.rgb_timestamp.append(publish_time)
         except Exception as e:
             rospy.logerr(f"Failed to convert image: {e}")
 
