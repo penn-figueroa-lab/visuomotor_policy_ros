@@ -95,8 +95,8 @@ def run():
     # Define GoPro configuration
     config = GoProConfig(
         device_name="/dev/video0",  # Adjust this to your device
-        frame_width=1920,
-        frame_height=1080,
+        frame_width=1280,
+        frame_height=720,
         fps=30,
     )
 

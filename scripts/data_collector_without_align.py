@@ -40,8 +40,9 @@ class data_saver:
         self.bridge = CvBridge()
 
         self.init_rgb = None
-        self.init_pose = None
+        self.latest_pose = None
         self.init_wrench = None
+
 
         # Data storage buffers
         self.rgb_data_with_timestamp = []
@@ -62,8 +63,8 @@ class data_saver:
         rospy.Service('/start_recording', Empty, self.start_recording)
         rospy.Service('/stop_recording', Empty, self.stop_recording)
 
-        # Timer for periodic data collection (30Hz)
-        # rospy.Timer(rospy.Duration(1.0 / 30), self.timer_callback)
+        # Timer for periodic data collection for end effector pose (300Hz)
+        rospy.Timer(rospy.Duration(1.0 / 300), self.eef_pose_data_collection_callback)
 
         # Initialize episode number
         if not rospy.has_param('/episode_num'):
@@ -126,17 +127,19 @@ class data_saver:
     def end_effector_callback(self, eef_msg):
         # Use PoseStamped message for 
         # publish_time = eef_msg.header.stamp.to_sec()
-        received_time = rospy.Time.now().to_nsec()
         pose = np.array([
             eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
             eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
         ])
-        self.pose_data_with_timestamp.append((received_time,pose))
-        self.init_pose = pose
-        if self.init_pose is None:
+        self.latest_pose = pose
+        if self.latest_pose is None:
             rospy.logwarn(f"Missing pose data")
         # self.pose_timestamp.append(publish_time)
 
+    def eef_pose_data_collection_callback(self, event):
+        received_time = rospy.Time.now().to_nsec()
+        self.pose_data_with_timestamp.append((received_time,self.latest_pose))
+       
 
     def force_sensor_callback(self, ft_msg):
         # publish_time = ft_msg.header.stamp.to_sec() 
