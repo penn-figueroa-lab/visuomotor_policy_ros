@@ -11,11 +11,13 @@ import torch
 import time
 import matplotlib.pyplot as plt
 import zarr
+import rospy
+from geometry_msgs.msg import WrenchStamped
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Pose, PointStamped, PoseStamped
 
 
-
-# from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
-# from PyriteEnvSuites.utils.env_utils import ts_to_js_traj, pose9pose9s1_to_traj
+from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
 
 from online_model_rollout.common_format import raw_to_obs
 import online_model_rollout.spacial_utility as su
@@ -38,6 +40,75 @@ if "PYRITE_CONTROL_LOG_FOLDERS" not in os.environ:
 checkpoint_folder_path = os.environ.get("PYRITE_CHECKPOINT_FOLDERS")
 hardware_config_folder_path = os.environ.get("PYRITE_HARDWARE_CONFIG_FOLDERS")
 control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
+
+class ObservationDataBuffer:
+    def __init__(self):
+        self.rgb_topic = rospy.get_param("~rgb_topic", "")
+        self.pose_topic = rospy.get_param("~pose_topic", "")
+        self.wrench_topic = rospy.get_param("~wrench_topic", "")
+
+        if self.rgb_topic == "" or \
+            self.pose_topic == "" or \
+            self.wrench_topic == "":
+
+            rospy.logerr("One or more parameters are missing. Please set the parameters")
+            rospy.signal_shutdown("Missing parameters")
+
+        # Subscribers
+        rospy.Subscriber(self.pose_topic, PoseStamped, self.end_effector_callback)
+        rospy.Subscriber(self.wrench_topic, WrenchStamped, self.force_sensor_callback)
+        rospy.Subscriber(self.rgb_topic, Image, self.camera_callback)
+
+        # Data Buffers (Saved in Tuple format)
+        self.stamped_rgb_data_buffer = []
+        self.stamped_pose_data_buffer = []
+        self.stamped_wrench_data_buffer = []
+           
+
+
+    def end_effector_callback(self, eef_msg):
+        # Use PoseStamped message for 
+        # publish_time = eef_msg.header.stamp.to_sec()
+        pose = np.array([
+            eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
+            eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
+        ])
+        self.latest_pose = pose
+        if self.latest_pose is None:
+            rospy.logwarn(f"Missing pose data")
+        # self.pose_timestamp.append(publish_time)
+
+    def eef_pose_data_collection_callback(self, event):
+        received_time = rospy.Time.now().to_nsec()
+        self.pose_data_with_timestamp.append((received_time,self.latest_pose))
+       
+
+    def force_sensor_callback(self, ft_msg):
+        received_time = rospy.Time.now().to_nsec()
+        wrench = np.array([
+            ft_msg.wrench.force.x, ft_msg.wrench.force.y, ft_msg.wrench.force.z,
+            ft_msg.wrench.torque.x, ft_msg.wrench.torque.y, ft_msg.wrench.torque.z
+        ])
+        self.stamped_wrench_data_buffer.append((received_time,wrench))
+        self.init_wrench = wrench
+        if self.init_wrench is None:
+            rospy.logwarn(f"Missing wrench data")
+
+
+    def camera_callback(self, rgb_msg):
+        try:
+            received_time = rospy.Time.now().to_nsec()
+
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
+            rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            self.rgb_data_with_timestamp.append((received_time,rgb))
+            self.init_rgb = rgb
+            if self.init_rgb is None:
+                rospy.logwarn(f"Missing rgb data")
+        except Exception as e:
+            rospy.logerr(f"Failed to convert image: {e}")
+
+
 
 
 def main():
@@ -169,17 +240,16 @@ def main():
     else:
         raise RuntimeError("unsupported")
 
-    if action_type == "pose9pose9s1":
-        action_to_trajectory = pose9pose9s1_to_traj
-    else:
-        raise RuntimeError("unsupported")
+    # if action_type == "pose9pose9s1":
+    #     action_to_trajectory = pose9pose9s1_to_traj
+    # else:
+    #     raise RuntimeError("unsupported")
 
     printOrNot(vbs_h2, "Creating MPC.")
     controller = ModelPredictiveControllerHybrid(
         shape_meta=shape_meta,
         id_list=id_list,
         policy=policy,
-        action_to_trajectory=action_to_trajectory,
         sparse_execution_horizon=sparse_execution_horizon,
     )
     controller.set_time_offset(env)
