@@ -22,11 +22,12 @@ from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
 from online_model_rollout.common_format import raw_to_obs
 import online_model_rollout.spacial_utility as su
 from online_model_rollout.policy_inference_utility import ModelPredictiveControllerHybrid
-from PyriteUtility.planning_control.trajectory import LinearTransformationInterpolator
+# from PyriteUtility.planning_control.trajectory import LinearTransformationInterpolator
 from online_model_rollout.model_io import load_policy
-from PyriteUtility.plotting.matplotlib_helpers import set_axes_equal
-from PyriteUtility.umi_utils.usb_util import reset_all_elgato_devices
-from PyriteUtility.common import GracefulKiller
+# from PyriteUtility.plotting.matplotlib_helpers import set_axes_equal
+# from PyriteUtility.umi_utils.usb_util import reset_all_elgato_devices
+# from PyriteUtility.common import GracefulKiller
+from online_model_rollout.common_format import get_image_transform
 
 if "PYRITE_CHECKPOINT_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_CHECKPOINT_FOLDERS")
@@ -41,8 +42,11 @@ checkpoint_folder_path = os.environ.get("PYRITE_CHECKPOINT_FOLDERS")
 hardware_config_folder_path = os.environ.get("PYRITE_HARDWARE_CONFIG_FOLDERS")
 control_log_folder_path = os.environ.get("PYRITE_CONTROL_LOG_FOLDERS")
 
+# id list, 0 for single arm
+id_list = [0]
+
 class ObservationDataBuffer:
-    def __init__(self):
+    def __init__(self,query_sizes, cam_res, policy_obs_res):
         self.rgb_topic = rospy.get_param("~rgb_topic", "")
         self.pose_topic = rospy.get_param("~pose_topic", "")
         self.wrench_topic = rospy.get_param("~wrench_topic", "")
@@ -54,33 +58,51 @@ class ObservationDataBuffer:
             rospy.logerr("One or more parameters are missing. Please set the parameters")
             rospy.signal_shutdown("Missing parameters")
 
+
         # Subscribers
         rospy.Subscriber(self.pose_topic, PoseStamped, self.end_effector_callback)
         rospy.Subscriber(self.wrench_topic, WrenchStamped, self.force_sensor_callback)
         rospy.Subscriber(self.rgb_topic, Image, self.camera_callback)
 
-        # Data Buffers (Saved in Tuple format)
+        self.id_list = [0]
+
+        # Sensor message initialization
+        self.init_rgb = None
+        self.init_pose = None
+        self.init_wrench = None
+
+        # Data Buffers for Sensors(Saved in Tuple format)
         self.stamped_rgb_data_buffer = []
         self.stamped_pose_data_buffer = []
         self.stamped_wrench_data_buffer = []
-           
+
+        # Query size for observation, in dictionary format, keys: rgb, wrench, pose
+        self.query_sizes = query_sizes
+
+        # Image Size Transformation Function
+        self.image_transform = get_image_transform(input_res=cam_res, output_res=policy_obs_res, bgr_to_rgb=False)
+
+        # Data Buffer for Observations
+        self.rgb_buffer = [np.zeros((self.query_sizes["rgb"], cam_res[0], cam_res[1], 3),dtype=np.uint8)]
+        self.rgb_timestamp_s = [np.array] * len(id_list)
+        self.ts_pose_buffer = [np.array] * len(id_list)
+        self.ts_pose_fb_timestamp_s = [np.array] * len(id_list)
+        self.wrench_buffer = [np.array] * len(id_list)
+        self.wrench_timestamp_s = [np.array] * len(id_list)
 
 
     def end_effector_callback(self, eef_msg):
         # Use PoseStamped message for 
         # publish_time = eef_msg.header.stamp.to_sec()
+        received_time = rospy.Time.now().to_nsec()
         pose = np.array([
             eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
             eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
         ])
-        self.latest_pose = pose
-        if self.latest_pose is None:
+        self.stamped_pose_data_buffer.append((received_time,self.latest_pose))
+        self.init_pose = pose
+        if self.init_pose is None:
             rospy.logwarn(f"Missing pose data")
-        # self.pose_timestamp.append(publish_time)
-
-    def eef_pose_data_collection_callback(self, event):
-        received_time = rospy.Time.now().to_nsec()
-        self.pose_data_with_timestamp.append((received_time,self.latest_pose))
        
 
     def force_sensor_callback(self, ft_msg):
@@ -107,6 +129,35 @@ class ObservationDataBuffer:
                 rospy.logwarn(f"Missing rgb data")
         except Exception as e:
             rospy.logerr(f"Failed to convert image: {e}")
+
+    def get_obs(self):
+        for id in self.id_list:
+            # rgb data
+            self.rgb_row_combined_buffer[id][:] = self.server.get_camera_rgb(
+                self.query_sizes["rgb"], id
+            )
+            self.rgb_timestamp_s[id] = (
+                self.server.get_camera_rgb_timestamps_ms(id) / 1000
+            )
+
+            # pose data
+            self.ts_pose_fb[id] = self.server.get_pose(
+                self.query_sizes["ts_pose_fb"], id
+            ).transpose()
+            self.ts_pose_fb_timestamp_s[id] = (
+                self.server.get_pose_timestamps_ms(id) / 1000
+            )
+
+            # wrench data
+            self.wrench[id] = self.server.get_wrench(
+                self.query_sizes["wrench"], id
+            ).transpose()
+            self.wrench_timestamp_s[id] = (
+                self.server.get_wrench_timestamps_ms(id) / 1000
+            )
+
+
+        
 
 
 
