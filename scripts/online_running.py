@@ -15,6 +15,8 @@ import rospy
 from geometry_msgs.msg import WrenchStamped
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Pose, PointStamped, PoseStamped
+from std_msgs.msg import Float64MultiArray, MultiArrayDimension
+from cv_bridge import CvBridge
 
 
 from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
@@ -80,6 +82,7 @@ class ObservationDataBuffer:
         self.query_sizes = query_sizes
 
         # Image Size Transformation Function
+        self.bridge = CvBridge()
         self.image_transform = get_image_transform(input_res=cam_res, output_res=policy_obs_res, bgr_to_rgb=False)
 
         # Data Buffer for Observations
@@ -123,7 +126,7 @@ class ObservationDataBuffer:
 
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
             rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            self.rgb_data_with_timestamp.append((received_time,rgb))
+            self.stamped_rgb_data_buffer.append((received_time,rgb))
             self.init_rgb = rgb
             if self.init_rgb is None:
                 rospy.logwarn(f"Missing rgb data")
@@ -133,63 +136,118 @@ class ObservationDataBuffer:
     def get_obs(self):
         for id in self.id_list:
             # rgb data
-            self.rgb_row_combined_buffer[id][:] = self.server.get_camera_rgb(
-                self.query_sizes["rgb"], id
-            )
-            self.rgb_timestamp_s[id] = (
-                self.server.get_camera_rgb_timestamps_ms(id) / 1000
-            )
-
+            self.rgb_timestamp_s[id] = np.array([tup[0] for tup in self.stamped_rgb_data_buffer[-self.query_sizes["rgb"]:]])/1e9
+            self.rgb_buffer[id] = np.array([tup[1] for tup in self.stamped_rgb_data_buffer[-self.query_sizes["rgb"]:]])
+            for i in range(self.query_sizes["rgb"]):
+                self.rgb_buffer[id][i] = self.image_transform(
+                    self.rgb_buffer[id][i]
+                )
+            
+            
             # pose data
-            self.ts_pose_fb[id] = self.server.get_pose(
-                self.query_sizes["ts_pose_fb"], id
-            ).transpose()
-            self.ts_pose_fb_timestamp_s[id] = (
-                self.server.get_pose_timestamps_ms(id) / 1000
-            )
-
+            self.ts_pose_fb_timestamp_s[id] = np.array([tup[0] for tup in self.stamped_pose_data_buffer[-self.query_sizes["ts_pose_fb"]:]])/1e9
+            self.ts_pose_buffer[id] = np.array([tup[1] for tup in self.stamped_pose_data_buffer[-self.query_sizes["ts_pose_fb"]:]])
+           
             # wrench data
-            self.wrench[id] = self.server.get_wrench(
-                self.query_sizes["wrench"], id
-            ).transpose()
-            self.wrench_timestamp_s[id] = (
-                self.server.get_wrench_timestamps_ms(id) / 1000
-            )
+            self.wrench_timestamp_s[id] = np.array([tup[0] for tup in self.stamped_wrench_data_buffer[-self.query_sizes["wrench"]:]])/1e9
+            self.wrench_buffer[id] = np.array([tup[1] for tup in self.stamped_wrench_data_buffer[-self.query_sizes["wrench"]:]])
+        
+        results = {}
+        for id in self.id_list:
+            results[f"rgb_{id}"] = self.rgb_buffer[id]
+            results[f"rgb_time_stamps_{id}"] = self.rgb_timestamp_s[id]
+            results[f"ts_pose_fb_{id}"] = self.ts_pose_buffer[id]
+            results[f"robot_time_stamps_{id}"] = self.ts_pose_fb_timestamp_s[id]
+            results[f"wrench_{id}"] = self.wrench_buffer[id]
+            results[f"wrench_time_stamps_{id}"] = self.wrench_timestamp_s[id]
 
 
+class PolicyRollout:
+    def __init__(self, device=torch.device("cuda"), dtype=torch.float32):
+        if torch.cuda.is_available() and device == torch.device("cuda"):
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
         
 
-
-
-
-def main():
-    control_para = {
+        self.control_para = {
         "raw_time_step_s": 0.002,  # dt of raw data collection. Used to compute time step from time_s such that the downsampling according to shape_meta works.
         "slow_down_factor": 1.5,  # 3 for flipup, 1.5 for wiping
         "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
         "max_duration_s": 3500,
         "pausing_mode": False,
         "device": "cuda",
-    }
-    pipeline_para = {
-        "save_low_dim_every_N_frame": 1,
-        "save_visual_every_N_frame": 1,
-        "ckpt_path": "/2024.09.25_21.10.43_flip_up_new_resnet_230",
-        # "hardware_config_path": hardware_config_folder_path + "/manip_server_config_left_arm.yaml",
-        "hardware_config_path": hardware_config_folder_path
-        + "/manip_server_config_bimanual.yaml",
-        "control_log_path": control_log_folder_path + "/temp/",
-    }
-    force_filtering_para = {
-        "sampling_freq": 100,
-        "cutoff_freq": 5,
-        "order": 5,
-    }
-    verbose = 1
+        }
+        self.pipeline_para = {
+            "save_low_dim_every_N_frame": 1,
+            "save_visual_every_N_frame": 1,
+            "ckpt_path": "/2025.02.18_14.20.38_flip_up_new_resnet_230",
+            "control_log_path": control_log_folder_path + "/temp/",
+        }
+        self.force_filtering_para = {
+            "sampling_freq": 100,
+            "cutoff_freq": 5,
+            "order": 5,
+        }
+        self.policy, self.shape_meta = load_policy(checkpoint_folder_path + self.pipeline_para["ckpt_path"], self.device)
 
-    episode_id = 0
 
-    def get_real_obs_resolution(shape_meta: dict) -> Tuple[int, int]:
+        (policy_image_width, policy_image_height) = self.get_real_obs_resolution(self.shape_meta)
+
+        # Observation Query Size
+        rgb_query_size = (
+            self.shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["horizon"] - 1
+        ) * self.shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["down_sample_steps"] + 1
+        ts_pose_query_size = (
+            self.shape_meta["sample"]["obs"]["sparse"]["robot0_eef_pos"]["horizon"] - 1
+        ) * self.shape_meta["sample"]["obs"]["sparse"]["robot0_eef_pos"]["down_sample_steps"] + 1
+        wrench_query_size = (
+            self.shape_meta["sample"]["obs"]["sparse"]["robot0_eef_wrench"]["horizon"] - 1
+        ) * self.shape_meta["sample"]["obs"]["sparse"]["robot0_eef_wrench"][
+            "down_sample_steps"
+        ] + 1
+        self.query_sizes = {
+            "rgb": rgb_query_size,
+            "ts_pose_fb": ts_pose_query_size,
+            "wrench": wrench_query_size,
+        }
+
+        # Observation Data Buffer
+        self.obs_data_buffer = ObservationDataBuffer(query_sizes=self.query_sizes, cam_res=(1280,720), policy_obs_res=(policy_image_width, policy_image_height))
+
+        # Action Timestamp Management
+        self.p_timestep_s = self.control_para["raw_time_step_s"]
+        sparse_action_down_sample_steps = self.shape_meta["sample"]["action"]["sparse"][
+            "down_sample_steps"
+        ]
+        sparse_action_horizon = self.shape_meta["sample"]["action"]["sparse"]["horizon"]
+        sparse_execution_horizon = (
+            sparse_action_down_sample_steps * self.control_para["sparse_execution_horizon"]
+        )
+        sparse_action_timesteps_s = (
+            np.arange(0, sparse_action_horizon)
+            * sparse_action_down_sample_steps
+            * self.p_timestep_s
+            * self.control_para["slow_down_factor"]
+        )
+
+        # Lowlevel action
+        action_type = "pose9pose9s1"  
+        self.id_list = [0]
+
+        self.controller = ModelPredictiveControllerHybrid(
+            shape_meta=self.shape_meta,
+            id_list=id_list,
+            policy=self.policy,
+            sparse_execution_horizon=sparse_execution_horizon,
+        )
+
+        # Action Publisher
+        self.action_publisher = rospy.Publisher('/mppi/higher_level_trajectory', Float64MultiArray, queue_size=10)
+  
+
+
+    def get_real_obs_resolution(self, shape_meta: dict) -> Tuple[int, int]:
         out_res = None
         obs_shape_meta = shape_meta["obs"]
         for key, attr in obs_shape_meta.items():
@@ -201,193 +259,21 @@ def main():
                     out_res = (wo, ho)
                 assert out_res == (wo, ho)
         return out_res
-
-    def printOrNot(verbose, *args):
-        if verbose >= 0:
-            print(f"[Episode {episode_id}] ", *args)
-
-    vbs_h1 = verbose + 1  # verbosity for header
-    vbs_h2 = verbose  # verbosity for sub-header
-    vbs_p = verbose - 1  # verbosity for paragraph
-
-    reset_all_elgato_devices()
-
-    # load policy
-    print("Loading policy: ", checkpoint_folder_path + pipeline_para["ckpt_path"])
-    device = torch.device(control_para["device"])
-    policy, shape_meta = load_policy(
-        checkpoint_folder_path + pipeline_para["ckpt_path"], device
-    )
-
-    # image size
-    (image_width, image_height) = get_real_obs_resolution(shape_meta)
-
-    # zarr img buffer size estimation: 20s, 1000hz step rate
-    img_buffer_size_estimated = int(
-        20 * 1000 / pipeline_para["save_visual_every_N_frame"]
-    )
-    rgb_buffer_shape_nhwc = (
-        img_buffer_size_estimated,
-        image_height,
-        image_width,
-        3,
-    )
-
-    rgb_query_size = (
-        shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["horizon"] - 1
-    ) * shape_meta["sample"]["obs"]["sparse"]["rgb_0"]["down_sample_steps"] + 1
-    ts_pose_query_size = (
-        shape_meta["sample"]["obs"]["sparse"]["robot0_eef_pos"]["horizon"] - 1
-    ) * shape_meta["sample"]["obs"]["sparse"]["robot0_eef_pos"]["down_sample_steps"] + 1
-    wrench_query_size = (
-        shape_meta["sample"]["obs"]["sparse"]["robot0_eef_wrench"]["horizon"] - 1
-    ) * shape_meta["sample"]["obs"]["sparse"]["robot0_eef_wrench"][
-        "down_sample_steps"
-    ] + 1
-    query_sizes = {
-        "rgb": rgb_query_size,
-        "ts_pose_fb": ts_pose_query_size,
-        "wrench": wrench_query_size,
-    }
-
-    env = ManipServerEnv(
-        camera_res_hw=(image_height, image_width),
-        hardware_config_path=pipeline_para["hardware_config_path"],
-        filter_params=force_filtering_para,
-        query_sizes=query_sizes,
-        compliant_dimensionality=3,
-    )
-
-    env.reset()
-
-    p_timestep_s = control_para["raw_time_step_s"]
-
-    sparse_action_down_sample_steps = shape_meta["sample"]["action"]["sparse"][
-        "down_sample_steps"
-    ]
-    sparse_action_horizon = shape_meta["sample"]["action"]["sparse"]["horizon"]
-    sparse_action_horizon_s = (
-        sparse_action_horizon * sparse_action_down_sample_steps * p_timestep_s
-    )
-    sparse_execution_horizon = (
-        sparse_action_down_sample_steps * control_para["sparse_execution_horizon"]
-    )
-    sparse_action_timesteps_s = (
-        np.arange(0, sparse_action_horizon)
-        * sparse_action_down_sample_steps
-        * p_timestep_s
-        * control_para["slow_down_factor"]
-    )
-
-    action_type = "pose9"  # "pose9" or "pose9pose9s1"
-    id_list = [0]
-    if shape_meta["action"]["shape"][0] == 9:
-        action_type = "pose9"
-    elif shape_meta["action"]["shape"][0] == 19:
-        action_type = "pose9pose9s1"
-    elif shape_meta["action"]["shape"][0] == 38:
-        action_type = "pose9pose9s1"
-        id_list = [0, 1]
-    else:
-        raise RuntimeError("unsupported")
-
-    # if action_type == "pose9pose9s1":
-    #     action_to_trajectory = pose9pose9s1_to_traj
-    # else:
-    #     raise RuntimeError("unsupported")
-
-    printOrNot(vbs_h2, "Creating MPC.")
-    controller = ModelPredictiveControllerHybrid(
-        shape_meta=shape_meta,
-        id_list=id_list,
-        policy=policy,
-        sparse_execution_horizon=sparse_execution_horizon,
-    )
-    controller.set_time_offset(env)
-
-    # timestep_idx = 0
-    # stiffness = None
-    episode_initial_time_s = env.current_hardware_time_s
-    execution_duration_s = (
-        sparse_execution_horizon * p_timestep_s * control_para["slow_down_factor"]
-    )
-    printOrNot(vbs_h2, "Starting main loop.")
-
-    if control_para["pausing_mode"]:
-        plt.ion()  # to run GUI event loop
-        fig = plt.figure()
-        ax = plt.axes(projection="3d")
-        x = np.linspace(-0.02, 0.2, 20)
-        y = np.linspace(-0.1, 0.1, 20)
-        z = np.linspace(-0.1, 0.1, 20)
-        ax.plot3D(x, y, z, color="blue", marker="o", markersize=3)
-        ax.plot3D(x, y, z, color="red", marker="o", markersize=3)
-        ax.set_title("Target and virtual target")
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_zlabel("Z")
-        plt.show()
-
-    # log
-    log_store = zarr.DirectoryStore(path=pipeline_para["control_log_path"])
-    log = zarr.open(store=log_store, mode="w")  # w: overrite if exists
-
-    horizon_count = 0
-    print("test plotting RGB. Press q to continue.")
-    while True:
-        obs_raw = env.get_observation_from_buffer()
-
-        # plot the rgb image
-        if len(id_list) == 1:
-            rgb = obs_raw["rgb_0"][-1]
-        else:
-            rgb = np.vstack([obs_raw[f"rgb_{i}"][-1] for i in id_list])
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        cv2.imshow("image", bgr)
-        key = cv2.waitKey(10)
-        if key == ord("q"):
-            break
-
-    ts_pose_initial = []
-    for id in id_list:
-        ts_pose_initial.append(obs_raw[f"ts_pose_fb_{id}"][-1])
-    #########################################
-    # main loop starts
-    #########################################
-    while True:
-        printOrNot(vbs_h1, "New episode. Episode ID: ", episode_id)
-        input("Press Enter to start the episode.")
-        killer = GracefulKiller()
-        while not killer.kill_now:
-            horizon_initial_time_s = env.current_hardware_time_s
-            printOrNot(vbs_h1, "Starting new horizon at ", horizon_initial_time_s)
-
-            obs_raw = env.get_observation_from_buffer()
-
-            # plot the rgb image
-            if len(id_list) == 1:
-                rgb = obs_raw["rgb_0"][-1]
-            else:
-                rgb = np.vstack([obs_raw[f"rgb_{i}"][-1] for i in id_list])
-            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            cv2.imshow("image", bgr)
-            cv2.waitKey(10)
-
+    
+    def run_online_rollout(self):
+        while not rospy.is_shutdown():
+            # Get observation
+            obs_raw = self.obs_data_buffer.get_obs()
             obs_task = dict()
-            raw_to_obs(obs_raw, obs_task, shape_meta)
-
-            assert action_type == "pose9pose9s1"
+            raw_to_obs(obs_raw, obs_task, self.shape_meta)
 
             # Run inference
-            controller.set_observation(obs_task["obs"])
+            self.controller.set_observation(obs_task["obs"])
             (
                 action_sparse_target_mats,
                 action_sparse_vt_mats,
                 action_stiffnesses,
-            ) = controller.compute_sparse_control(device)
-
-            # for id in id_list:
-            #     print(f"Stiffness {id}: ", action_stiffnesses[id])
+            ) = self.controller.compute_sparse_control(self.device)
 
             # decode stiffness matrix
             outputs_ts_nominal_targets = [np.array] * len(id_list)
@@ -445,215 +331,22 @@ def main():
                 outputs_ts_targets[id] = ts_targets_virtual
                 outputs_ts_stiffnesses[id] = ts_stiffnesses
 
-            # the "now" when the observation is taken
-            action_start_time_s = obs_raw["robot_time_stamps_0"][-1]
-            timestamps = sparse_action_timesteps_s
+            outputs_ts_targets = outputs_ts_targets[0].T  # N x 7 to 7 x N
+            outputs_ts_stiffnesses = outputs_ts_stiffnesses[0]
 
-            if control_para["pausing_mode"]:
-                # plot the actions for this horizon using matplotlib
-                ax.cla()
-                for id in id_list:
-                    ax.plot3D(
-                        action_sparse_target_mats[id][..., 0, 3],
-                        action_sparse_target_mats[id][..., 1, 3],
-                        action_sparse_target_mats[id][..., 2, 3],
-                        color="red",
-                        marker="o",
-                        markersize=3,
-                    )
+            joint_data_list = [outputs_ts_targets.tolist(), outputs_ts_stiffnesses.tolist()]
+            flattened_data = np.concatenate(joint_data_list, axis=None).tolist()
+ 
+            msg = Float64MultiArray()
+            msg.data = flattened_data  # Store actual data
 
-                    ax.plot3D(
-                        action_sparse_vt_mats[id][..., 0, 3],
-                        action_sparse_vt_mats[id][..., 1, 3],
-                        action_sparse_vt_mats[id][..., 2, 3],
-                        color="blue",
-                        marker="o",
-                        markersize=3,
-                    )
+            msg.layout.dim.append(MultiArrayDimension(label="matrix_num", size=2, stride=len(outputs_ts_targets)*len(outputs_ts_targets[0])))  # 2 matrix
+            msg.layout.dim.append(MultiArrayDimension(label="horizon", size=len(outputs_ts_targets), stride=1))  # 6 columns
+            self.action_publisher.publish(msg)
 
-                    ax.plot3D(
-                        action_sparse_target_mats[id][
-                            : control_para["sparse_execution_horizon"], 0, 3
-                        ],
-                        action_sparse_target_mats[id][
-                            : control_para["sparse_execution_horizon"], 1, 3
-                        ],
-                        action_sparse_target_mats[id][
-                            : control_para["sparse_execution_horizon"], 2, 3
-                        ],
-                        color="yellow",
-                        linewidth=3,
-                        marker="o",
-                        markersize=4,
-                    )
-
-                    ax.plot3D(
-                        action_sparse_vt_mats[id][
-                            : control_para["sparse_execution_horizon"], 0, 3
-                        ],
-                        action_sparse_vt_mats[id][
-                            : control_para["sparse_execution_horizon"], 1, 3
-                        ],
-                        action_sparse_vt_mats[id][
-                            : control_para["sparse_execution_horizon"], 2, 3
-                        ],
-                        color="green",
-                        linewidth=3,
-                        marker="o",
-                        markersize=4,
-                    )
-
-                    ax.plot3D(
-                        obs_raw[f"ts_pose_fb_{id}"][-1][0],
-                        obs_raw[f"ts_pose_fb_{id}"][-1][1],
-                        obs_raw[f"ts_pose_fb_{id}"][-1][2],
-                        color="black",
-                        marker="o",
-                        markersize=8,
-                    )
-
-                ax.set_xlabel("X")
-                ax.set_ylabel("Y")
-                ax.set_zlabel("Z")
-
-                set_axes_equal(ax)
-
-                plt.draw()
-
-                input("Press Enter to start executing the plotted actions.")
-
-                # log the whole action
-                horizon_log = log.create_group(f"horizon_{horizon_count}")
-                action_start_time_s = env.current_hardware_time_s
-                for id in id_list:
-                    horizon_log.create_dataset(
-                        f"ts_virtual_targets_{id}", data=outputs_ts_targets[id]
-                    )
-                    horizon_log.create_dataset(
-                        f"ts_nominal_targets_{id}", data=outputs_ts_nominal_targets[id]
-                    )
-                    horizon_log.create_dataset(
-                        f"ts_stiffnesses_{id}", data=outputs_ts_stiffnesses[id]
-                    )
-                horizon_log.create_dataset(
-                    "timestamps_s", data=timestamps + action_start_time_s
-                )
-
-                # cut the action and only keep the execution horizon
-                for id in id_list:
-                    outputs_ts_targets[id] = outputs_ts_targets[id][
-                        : control_para["sparse_execution_horizon"], :
-                    ]
-                    outputs_ts_stiffnesses[id] = outputs_ts_stiffnesses[id][
-                        :, : 6 * control_para["sparse_execution_horizon"]
-                    ]
-                timestamps = timestamps[: control_para["sparse_execution_horizon"]]
-                action_start_time_s = env.current_hardware_time_s
-
-            if len(id_list) == 1:
-                outputs_ts_targets = outputs_ts_targets[0].T  # N x 7 to 7 x N
-                outputs_ts_stiffnesses = outputs_ts_stiffnesses[0]
-            else:
-                outputs_ts_targets = np.hstack(
-                    outputs_ts_targets
-                ).T  # 2 x N x 7 to 14 x N
-                outputs_ts_stiffnesses = np.vstack(
-                    outputs_ts_stiffnesses
-                )  # 6 x (6xN) to 12 x (6xN)
-
-            env.schedule_controls(
-                pose7_cmd=outputs_ts_targets,
-                stiffness_matrices_6x6=outputs_ts_stiffnesses,
-                timestamps=(timestamps + action_start_time_s) * 1000,
-            )
-
-            # # log the truncated action
-            # horizon_log = log.create_group(f"horizon_{horizon_count}")
-            # horizon_log.create_dataset("ts_targets", data=outputs_ts_targets)
-            # horizon_log.create_dataset("timestamps", data=timestamps * 1000)
-            # horizon_log.create_dataset("ts_stiffnesses", data=outputs_ts_stiffnesses)
-            # horizon_log.create_dataset(
-            #     "timestamps_s", data=timestamps + action_start_time_s
-            # )
-            horizon_count += 1
-
-            if control_para["pausing_mode"]:
-                c = input("Press Enter to start the next horizon. q to quit.")
-                if c == "q":
-                    break
-
-            # # log
-            # if warming_up_done:
-            #     if timestep_idx % pipeline_para["save_low_dim_every_N_frame"] == 0:
-            #         env.add_low_dim_observation(None, ts_target, time_s)
-            #         # env.add_optional_observation(stiffness)
-            #     if timestep_idx % pipeline_para["save_visual_every_N_frame"] == 0:
-            #         env.add_visual_observation(time_s)
-
-            time_s = env.current_hardware_time_s
-            sleep_duration_s = horizon_initial_time_s + execution_duration_s - time_s
-
-            printOrNot(vbs_h1, "sleep_duration_s", sleep_duration_s)
-            time.sleep(max(0, sleep_duration_s))
-
-            if not control_para["pausing_mode"]:
-                # only check duration when not in pausing mode
-                if time_s - episode_initial_time_s > control_para["max_duration_s"]:
-                    break
-
-        printOrNot(vbs_h1, "End of episode.")
-        episode_id += 1
-
-        print("Options:")
-        print("     c: continue to next episode.")
-        print("     r: reset to default pose, then continue.")
-        print("     b: reset to default pose, then quit the program.")
-        print("     others: quit the program.")
-        c = input("Please select an option: ")
-        if c == "r" or c == "b":
-            print("Resetting to default pose.")
-            obs_raw = env.get_observation_from_buffer()
-            N = 100
-            duration_s = 5
-            timestamps = np.linspace(0, 1, N) * duration_s
-            homing_ts_targets = np.zeros([7 * len(id_list), N])
-            for id in id_list:
-                ts_pose_fb = obs_raw[f"ts_pose_fb_{id}"][-1]
-                SE3_waypoints = [
-                    su.pose7_to_SE3(ts_pose_fb),
-                    su.pose7_to_SE3(ts_pose_initial[id]),
-                ]
-
-                SE3_interpolator = LinearTransformationInterpolator(
-                    x_wp=np.array([0, duration_s]),
-                    y_wp=np.array(SE3_waypoints),
-                )
-                SE3_waypoints = SE3_interpolator(timestamps)
-
-                for i in range(N):
-                    wpi = SE3_waypoints[i]
-                    pose7 = su.SE3_to_pose7(wpi)
-                    homing_ts_targets[0 + id * 7 : 7 + id * 7, i] = pose7
-
-            time_now_s = env.current_hardware_time_s
-            env.schedule_controls(
-                pose7_cmd=homing_ts_targets,
-                timestamps=(timestamps + time_now_s) * 1000,
-            )
-        elif c == "c":
-            pass
-        else:
-            print("Quitting the program.")
-            break
-
-        if c == "b":
-            input("Press Enter to quit program.")
-            break
-
-        print("Continuing to execution.")
-    env.cleanup()
-    # end of episode
 
 
 if __name__ == "__main__":
-    main()
+    rospy.init_node('policy_rollout')
+    policy = PolicyRollout()
+    policy.run_online_rollout()

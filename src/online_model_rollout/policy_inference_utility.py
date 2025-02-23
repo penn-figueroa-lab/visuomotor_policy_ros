@@ -13,6 +13,7 @@ from typing import Callable
 import online_model_rollout.common_format as task
 
 from online_model_rollout.common_format import dict_apply
+import rospy
 
 
 def printOrNot(verbose, *args):
@@ -73,7 +74,7 @@ class ModelPredictiveControllerHybrid():
         self.sparse_execution_horizon_time_step = sparse_execution_horizon
 
         # internal variables
-        self.time_offset = None
+        # self.time_offset = None
         self.sparse_obs_data = {}
         self.sparse_obs_last_timestamps = {}
         self.horizon_start_time_step = -np.inf
@@ -91,12 +92,12 @@ class ModelPredictiveControllerHybrid():
         print("[MPC] Done initializing")
 
 
-    def set_time_offset(self, hardware):
-        '''
-        Set time offset such that timing in this controller is aligned with hardware time.
-        hardware: a class with a property 'current_hardware_time_s'
-        '''
-        self.time_offset = hardware.current_hardware_time_s - time.perf_counter()
+    # def set_time_offset(self, hardware_time):
+    #     '''
+    #     Set time offset such that timing in this controller is aligned with hardware time.
+    #     hardware: a class with a property 'current_hardware_time_s'
+    #     '''
+    #     self.time_offset = hardware_time - time.perf_counter()
 
     def set_observation(self, obs_task):
         for key, attr in self.shape_meta['sample']['obs']['sparse'].items():
@@ -115,7 +116,7 @@ class ModelPredictiveControllerHybrid():
     def compute_sparse_control(self, device):
         """ Run sparse model inference once. Does not output control.
         """
-        time_now = time.perf_counter() + self.time_offset
+        time_now = rospy.Time.now().to_nsec()/1e9
         for id in self.id_list:
             dt_rgb = time_now - self.sparse_obs_last_timestamps[f"rgb_time_stamps_{id}"]
             dt_ts_pose = time_now - self.sparse_obs_last_timestamps[f"robot_time_stamps_{id}"]
