@@ -20,7 +20,7 @@
   <node pkg="robotiq_force_torque_sensor_custom" type="rq_stream_sensor_custom" name="rq_stream_sensor_custom" output="screen" />
   
   <!-- Franka Node launch -->
-  <node pkg="visuomotor_policy_ros" type="online_running.py" name="policy_rollout" output="screen">
+  <node pkg="visuomotor_policy_ros" type="online_running.py" name="online_running" output="screen">
     <param name="rgb_topic" value="$(arg rgb_topic)" />
     <param name="pose_topic" value="$(arg pose_topic)" />
     <param name="wrench_topic" value="$(arg wrench_topic)" />

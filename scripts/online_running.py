@@ -19,7 +19,7 @@ from std_msgs.msg import Float64MultiArray, MultiArrayDimension
 from cv_bridge import CvBridge
 
 
-from PyriteEnvSuites.envs.task.manip_server_env import ManipServerEnv
+
 
 from online_model_rollout.common_format import raw_to_obs
 import online_model_rollout.spacial_utility as su
@@ -31,12 +31,13 @@ from online_model_rollout.model_io import load_policy
 # from PyriteUtility.common import GracefulKiller
 from online_model_rollout.common_format import get_image_transform
 
+
 if "PYRITE_CHECKPOINT_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_CHECKPOINT_FOLDERS")
-if "PYRITE_HARDWARE_CONFIG_FOLDERS" not in os.environ:
-    raise ValueError(
-        "Please set the environment variable PYRITE_HARDWARE_CONFIG_FOLDERS"
-    )
+# if "PYRITE_HARDWARE_CONFIG_FOLDERS" not in os.environ:
+#     raise ValueError(
+#         "Please set the environment variable PYRITE_HARDWARE_CONFIG_FOLDERS"
+#     )
 if "PYRITE_CONTROL_LOG_FOLDERS" not in os.environ:
     raise ValueError("Please set the environment variable PYRITE_CONTROL_LOG_FOLDERS")
 
@@ -102,7 +103,7 @@ class ObservationDataBuffer:
             eef_msg.pose.position.x, eef_msg.pose.position.y, eef_msg.pose.position.z,
             eef_msg.pose.orientation.x, eef_msg.pose.orientation.y, eef_msg.pose.orientation.z, eef_msg.pose.orientation.w
         ])
-        self.stamped_pose_data_buffer.append((received_time,self.latest_pose))
+        self.stamped_pose_data_buffer.append((received_time,pose))
         self.init_pose = pose
         if self.init_pose is None:
             rospy.logwarn(f"Missing pose data")
@@ -126,6 +127,8 @@ class ObservationDataBuffer:
 
             cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
             rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            rgb = rgb[0:720,280:1000]
+            rgb = cv2.resize(rgb, (224,224), interpolation=cv2.INTER_AREA)
             self.stamped_rgb_data_buffer.append((received_time,rgb))
             self.init_rgb = rgb
             if self.init_rgb is None:
@@ -136,13 +139,14 @@ class ObservationDataBuffer:
     def get_obs(self):
         for id in self.id_list:
             # rgb data
+            # print("self.stamped_rgb_data_buffer: ", self.stamped_rgb_data_buffer)
+            # print("self.rgb_buffer[id]: ",self.rgb_buffer[id])
             self.rgb_timestamp_s[id] = np.array([tup[0] for tup in self.stamped_rgb_data_buffer[-self.query_sizes["rgb"]:]])/1e9
             self.rgb_buffer[id] = np.array([tup[1] for tup in self.stamped_rgb_data_buffer[-self.query_sizes["rgb"]:]])
             for i in range(self.query_sizes["rgb"]):
                 self.rgb_buffer[id][i] = self.image_transform(
                     self.rgb_buffer[id][i]
                 )
-            
             
             # pose data
             self.ts_pose_fb_timestamp_s[id] = np.array([tup[0] for tup in self.stamped_pose_data_buffer[-self.query_sizes["ts_pose_fb"]:]])/1e9
@@ -160,6 +164,7 @@ class ObservationDataBuffer:
             results[f"robot_time_stamps_{id}"] = self.ts_pose_fb_timestamp_s[id]
             results[f"wrench_{id}"] = self.wrench_buffer[id]
             results[f"wrench_time_stamps_{id}"] = self.wrench_timestamp_s[id]
+        return results
 
 
 class PolicyRollout:
@@ -176,7 +181,6 @@ class PolicyRollout:
         "sparse_execution_horizon": 12,  # 12 for flipup, 8/24 for wiping
         "max_duration_s": 3500,
         "pausing_mode": False,
-        "device": "cuda",
         }
         self.pipeline_para = {
             "save_low_dim_every_N_frame": 1,
@@ -184,11 +188,9 @@ class PolicyRollout:
             "ckpt_path": "/2025.02.18_14.20.38_flip_up_new_resnet_230",
             "control_log_path": control_log_folder_path + "/temp/",
         }
-        self.force_filtering_para = {
-            "sampling_freq": 100,
-            "cutoff_freq": 5,
-            "order": 5,
-        }
+        
+        ckp_load_path = checkpoint_folder_path + self.pipeline_para["ckpt_path"]
+        print("ckp_load_path: ", ckp_load_path)
         self.policy, self.shape_meta = load_policy(checkpoint_folder_path + self.pipeline_para["ckpt_path"], self.device)
 
 
@@ -213,7 +215,8 @@ class PolicyRollout:
         }
 
         # Observation Data Buffer
-        self.obs_data_buffer = ObservationDataBuffer(query_sizes=self.query_sizes, cam_res=(1280,720), policy_obs_res=(policy_image_width, policy_image_height))
+        self.obs_data_buffer = ObservationDataBuffer(query_sizes=self.query_sizes, cam_res=(224,224), policy_obs_res=(policy_image_width, policy_image_height))
+        time.sleep(2)
 
         # Action Timestamp Management
         self.p_timestep_s = self.control_para["raw_time_step_s"]
@@ -224,7 +227,7 @@ class PolicyRollout:
         sparse_execution_horizon = (
             sparse_action_down_sample_steps * self.control_para["sparse_execution_horizon"]
         )
-        sparse_action_timesteps_s = (
+        self.sparse_action_timesteps_s = (
             np.arange(0, sparse_action_horizon)
             * sparse_action_down_sample_steps
             * self.p_timestep_s
@@ -232,7 +235,6 @@ class PolicyRollout:
         )
 
         # Lowlevel action
-        action_type = "pose9pose9s1"  
         self.id_list = [0]
 
         self.controller = ModelPredictiveControllerHybrid(
@@ -243,7 +245,7 @@ class PolicyRollout:
         )
 
         # Action Publisher
-        self.action_publisher = rospy.Publisher('/mppi/higher_level_trajectory', Float64MultiArray, queue_size=10)
+        self.action_publisher = rospy.Publisher('/adp/ref_pose_stiffness', Float64MultiArray, queue_size=10)
   
 
 
@@ -262,8 +264,10 @@ class PolicyRollout:
     
     def run_online_rollout(self):
         while not rospy.is_shutdown():
+            rospy.loginfo("START ONLINE!!!!!")
             # Get observation
             obs_raw = self.obs_data_buffer.get_obs()
+            # print("obs_raw: ",obs_raw)
             obs_task = dict()
             raw_to_obs(obs_raw, obs_task, self.shape_meta)
 
@@ -330,9 +334,12 @@ class PolicyRollout:
                 outputs_ts_nominal_targets[id] = ts_targets_nominal
                 outputs_ts_targets[id] = ts_targets_virtual
                 outputs_ts_stiffnesses[id] = ts_stiffnesses
+            
+            action_start_time_s = obs_raw["robot_time_stamps_0"][-1]
 
             outputs_ts_targets = outputs_ts_targets[0].T  # N x 7 to 7 x N
             outputs_ts_stiffnesses = outputs_ts_stiffnesses[0]
+            timestamps = self.sparse_action_timesteps_s + action_start_time_s
 
             joint_data_list = [outputs_ts_targets.tolist(), outputs_ts_stiffnesses.tolist()]
             flattened_data = np.concatenate(joint_data_list, axis=None).tolist()
@@ -345,8 +352,13 @@ class PolicyRollout:
             self.action_publisher.publish(msg)
 
 
-
-if __name__ == "__main__":
-    rospy.init_node('policy_rollout')
+def main():
+    rospy.init_node('online_running')
     policy = PolicyRollout()
     policy.run_online_rollout()
+
+
+
+if __name__ == "__main__":
+    main()
+    

@@ -11,7 +11,8 @@ import hydra
 
 
 # TODO: Remove this dependency
-from online_model_rollout.model_workspace import BaseWorkspace
+from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from diffusion_policy.workspace.train_diffusion_unet_image_workspace import TrainDiffusionUnetImageWorkspace
 
 
 
