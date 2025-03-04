@@ -102,10 +102,7 @@ class ModelPredictiveControllerHybrid():
     def set_observation(self, obs_task):
         for key, attr in self.shape_meta['sample']['obs']['sparse'].items():
             data = obs_task[key]
-            if key == "robot0_eef_wrench":
-                horizon = 250
-            else:
-                horizon = attr['horizon']
+            horizon = attr['horizon']
            
             down_sample_steps = attr['down_sample_steps']
             # sample 'horizon' number of latest obs from the queue

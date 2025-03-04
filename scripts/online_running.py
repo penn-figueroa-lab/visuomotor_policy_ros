@@ -185,7 +185,7 @@ class PolicyRollout:
         self.pipeline_para = {
             "save_low_dim_every_N_frame": 1,
             "save_visual_every_N_frame": 1,
-            "ckpt_path": "/2025.02.18_14.20.38_flip_up_new_resnet_230",
+            "ckpt_path": "/2025.03.04_13.43.38_flip_up_new_conv_230",
             "control_log_path": control_log_folder_path + "/temp/",
         }
         

@@ -306,10 +306,8 @@ def sparse_obs_to_obs_sample(
 
         # double check the shape
         for key, attr in shape_meta["sample"]["obs"]["sparse"].items():
-            if key == "robot0_eef_wrench":
-                sparse_obs_horizon = 250
-            else:
-                sparse_obs_horizon = attr["horizon"]
+            
+            sparse_obs_horizon = attr["horizon"]
             
             if shape_meta["obs"][key]["type"] == "low_dim":
                 assert len(sparse_obs_processed[key].shape) == 2  # (T, D)
