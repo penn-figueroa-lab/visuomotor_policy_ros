@@ -125,9 +125,8 @@ class ObservationDataBuffer:
         try:
             received_time = rospy.Time.now().to_nsec()
 
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
-            rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            rgb = rgb[0:720,280:1000]
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
+            rgb = cv_image[0:720,280:1000]
             rgb = cv2.resize(rgb, (224,224), interpolation=cv2.INTER_AREA)
             self.stamped_rgb_data_buffer.append((received_time,rgb))
             self.init_rgb = rgb

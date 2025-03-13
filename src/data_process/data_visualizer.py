@@ -40,7 +40,6 @@ for demo in demo_dirs:
     
     for index in range(demo_length):
         obs_image = demo_data['rgb_data'][index]
-        obs_image = cv2.cvtColor(obs_image, cv2.COLOR_BGR2RGB)
         out.write(obs_image)
         cv2.imshow("Gopro Image", obs_image)
         key = cv2.waitKey(30)
