@@ -68,12 +68,16 @@ class GoPro:
         rate = rospy.Rate(self.config.fps)  # Use ROS rate to control FPS
         while not rospy.is_shutdown():
             ret, frame = self.cap.read()
+            if self.config.crop_cols is not None and self.config.crop_rows is not None:
+                crop_cols = self.config.crop_cols
+                crop_rows = self.config.crop_rows
+                frame = frame[crop_rows[0]:crop_rows[1], crop_cols[0]:crop_cols[1]]
             if not ret:
                 rospy.logwarn("Failed to capture frame!")
                 break
 
             # Convert OpenCV image to ROS Image message
-            ros_image = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            ros_image = self.bridge.cv2_to_imgmsg(frame, encoding="rgb8")
 
             # Publish the image
             self.pub.publish(ros_image)
@@ -90,7 +94,9 @@ class GoPro:
 
 # Example usage
 def run():
-    rospy.init_node("image_publisher", anonymous=True)  # Initialize ROS node
+    print("INITIALIZE GOPRO!!!!")
+    rospy.init_node("gopro_publisher")  # Initialize ROS node
+    print("Init GOPRO ROsNode")
 
     # Define GoPro configuration
     config = GoProConfig(
@@ -98,10 +104,15 @@ def run():
         frame_width=1280,
         frame_height=720,
         fps=30,
+        crop_rows=[0,720],
+        crop_cols=[280,1000]
     )
+    print("Init GOPRO Config")
 
     # Initialize GoPro
     gopro = GoPro()
+    print("Init GOPRO Class")
+
     time0 = datetime.now()
     if not gopro.initialize(time0, config):
         print("Failed to initialize GoPro.")

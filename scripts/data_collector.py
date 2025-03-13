@@ -134,8 +134,8 @@ class data_saver:
 
     def camera_callback(self, rgb_msg):
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
-            self.latest_rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
+            self.latest_rgb = cv_image
             rospy.loginfo(f"RGB shape: {self.latest_rgb.shape}")
         except Exception as e:
             rospy.logerr(f"Failed to convert image: {e}")

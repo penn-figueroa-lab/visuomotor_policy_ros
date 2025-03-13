@@ -125,9 +125,8 @@ class ObservationDataBuffer:
         try:
             received_time = rospy.Time.now().to_nsec()
 
-            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="bgr8")
-            rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
-            rgb = rgb[0:720,280:1000]
+            cv_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding="rgb8")
+            rgb = cv_image[0:720,280:1000]
             rgb = cv2.resize(rgb, (224,224), interpolation=cv2.INTER_AREA)
             self.stamped_rgb_data_buffer.append((received_time,rgb))
             self.init_rgb = rgb
@@ -185,7 +184,7 @@ class PolicyRollout:
         self.pipeline_para = {
             "save_low_dim_every_N_frame": 1,
             "save_visual_every_N_frame": 1,
-            "ckpt_path": "/2025.03.04_13.43.38_flip_up_new_conv_230",
+            "ckpt_path": "/2025.03.11_17.11.48_flip_up_new_conv_230",
             "control_log_path": control_log_folder_path + "/temp/",
         }
         
@@ -245,7 +244,10 @@ class PolicyRollout:
         )
 
         # Action Publisher
-        self.action_publisher = rospy.Publisher('/adp/ref_pose_stiffness', Float64MultiArray, queue_size=10)
+        self.action_publisher = rospy.Publisher('/cartesian_impedance_controller/desired_pose', PoseStamped, queue_size=10)
+        self.publish_step_counter = 0
+        self.output_virtual_target = None
+        self.action_steps = 10
   
 
 
@@ -272,85 +274,115 @@ class PolicyRollout:
             raw_to_obs(obs_raw, obs_task, self.shape_meta)
 
             # Run inference
-            self.controller.set_observation(obs_task["obs"])
-            (
-                action_sparse_target_mats,
-                action_sparse_vt_mats,
-                action_stiffnesses,
-            ) = self.controller.compute_sparse_control(self.device)
+            if self.publish_step_counter >= self.action_steps or self.output_virtual_target is None:
+                self.publish_step_counter = 0
+                self.controller.set_observation(obs_task["obs"])
+                (
+                    action_sparse_target_mats,
+                    action_sparse_vt_mats,
+                    action_stiffnesses,
+                ) = self.controller.compute_sparse_control(self.device)
 
-            # decode stiffness matrix
-            outputs_ts_nominal_targets = [np.array] * len(id_list)
-            outputs_ts_targets = [np.array] * len(id_list)
-            outputs_ts_stiffnesses = [np.array] * len(id_list)
-            for id in id_list:
-                SE3_TW = su.SE3_inv(su.pose7_to_SE3(obs_raw[f"ts_pose_fb_{id}"][-1]))
-                ts_targets_nominal = su.SE3_to_pose7(
-                    action_sparse_target_mats[id].reshape([-1, 4, 4])
-                )
-                ts_targets_virtual = su.SE3_to_pose7(
-                    action_sparse_vt_mats[id].reshape([-1, 4, 4])
-                )
-
-                ts_stiffnesses = np.zeros([6, 6 * ts_targets_virtual.shape[0]])
-                for i in range(ts_targets_virtual.shape[0]):
-                    SE3_target = action_sparse_target_mats[id][i].reshape([4, 4])
-                    SE3_virtual_target = action_sparse_vt_mats[id][i].reshape([4, 4])
-                    stiffness = action_stiffnesses[id][i]
-
-                    # stiffness: 1. convert vt to tool frame
-                    SE3_TVt = SE3_TW @ SE3_virtual_target
-                    SE3_Ttarget = SE3_TW @ SE3_target
-
-                    # stiffness: 2. compute stiffness matrix in the tool frame
-                    compliance_direction_tool = (
-                        SE3_TVt[:3, 3] - SE3_Ttarget[:3, 3]
-                    ).reshape(3)
-
-                    if np.linalg.norm(compliance_direction_tool) < 0.001:  #
-                        compliance_direction_tool = np.array([1.0, 0.0, 0.0])
-
-                    compliance_direction_tool /= np.linalg.norm(
-                        compliance_direction_tool
+                # decode stiffness matrix
+                outputs_ts_nominal_targets = [np.array] * len(id_list)
+                outputs_ts_targets = [np.array] * len(id_list)
+                outputs_ts_stiffnesses = [np.array] * len(id_list)
+                for id in id_list:
+                    SE3_TW = su.SE3_inv(su.pose7_to_SE3(obs_raw[f"ts_pose_fb_{id}"][-1]))
+                    ts_targets_nominal = su.SE3_to_pose7(
+                        action_sparse_target_mats[id].reshape([-1, 4, 4])
                     )
-                    X = compliance_direction_tool
-                    Y = np.cross(X, np.array([0, 0, 1]))
-                    Y /= np.linalg.norm(Y)
-                    Z = np.cross(X, Y)
-
-                    default_stiffness = 5000
-                    default_stiffness_rot = 100
-                    target_stiffness = stiffness
-
-                    M = np.diag(
-                        [target_stiffness, default_stiffness, default_stiffness]
+                    ts_targets_virtual = su.SE3_to_pose7(
+                        action_sparse_vt_mats[id].reshape([-1, 4, 4])
                     )
-                    S = np.array([X, Y, Z]).T
-                    stiffness_matrix = S @ M @ np.linalg.inv(S)
-                    stiffness_matrix_full = np.eye(6) * default_stiffness_rot
-                    stiffness_matrix_full[:3, :3] = stiffness_matrix
-                    ts_stiffnesses[:, 6 * i : 6 * i + 6] = stiffness_matrix_full
 
-                outputs_ts_nominal_targets[id] = ts_targets_nominal
-                outputs_ts_targets[id] = ts_targets_virtual
-                outputs_ts_stiffnesses[id] = ts_stiffnesses
-            
-            action_start_time_s = obs_raw["robot_time_stamps_0"][-1]
+                    ts_stiffnesses = np.zeros([6, 6 * ts_targets_virtual.shape[0]])
+                    for i in range(ts_targets_virtual.shape[0]):
+                        SE3_target = action_sparse_target_mats[id][i].reshape([4, 4])
+                        SE3_virtual_target = action_sparse_vt_mats[id][i].reshape([4, 4])
+                        stiffness = action_stiffnesses[id][i]
 
-            outputs_ts_targets = outputs_ts_targets[0].T  # N x 7 to 7 x N
-            outputs_ts_stiffnesses = outputs_ts_stiffnesses[0]
-            timestamps = self.sparse_action_timesteps_s + action_start_time_s
+                        # stiffness: 1. convert vt to tool frame
+                        SE3_TVt = SE3_TW @ SE3_virtual_target
+                        SE3_Ttarget = SE3_TW @ SE3_target
 
-            joint_data_list = [outputs_ts_targets.tolist(), outputs_ts_stiffnesses.tolist()]
-            flattened_data = np.concatenate(joint_data_list, axis=None).tolist()
+                        # stiffness: 2. compute stiffness matrix in the tool frame
+                        compliance_direction_tool = (
+                            SE3_TVt[:3, 3] - SE3_Ttarget[:3, 3]
+                        ).reshape(3)
+
+                        if np.linalg.norm(compliance_direction_tool) < 0.001:  #
+                            compliance_direction_tool = np.array([1.0, 0.0, 0.0])
+
+                        compliance_direction_tool /= np.linalg.norm(
+                            compliance_direction_tool
+                        )
+                        X = compliance_direction_tool
+                        Y = np.cross(X, np.array([0, 0, 1]))
+                        Y /= np.linalg.norm(Y)
+                        Z = np.cross(X, Y)
+
+                        default_stiffness = 5000
+                        default_stiffness_rot = 100
+                        target_stiffness = stiffness
+
+                        M = np.diag(
+                            [target_stiffness, default_stiffness, default_stiffness]
+                        )
+                        S = np.array([X, Y, Z]).T
+                        stiffness_matrix = S @ M @ np.linalg.inv(S)
+                        stiffness_matrix_full = np.eye(6) * default_stiffness_rot
+                        stiffness_matrix_full[:3, :3] = stiffness_matrix
+                        ts_stiffnesses[:, 6 * i : 6 * i + 6] = stiffness_matrix_full
+
+                    outputs_ts_nominal_targets[id] = ts_targets_nominal
+                    outputs_ts_targets[id] = ts_targets_virtual
+                    outputs_ts_stiffnesses[id] = ts_stiffnesses
+                
+                action_start_time_s = obs_raw["robot_time_stamps_0"][-1]
+
+                outputs_ts_targets = outputs_ts_targets[0]
+                outputs_ts_stiffnesses = outputs_ts_stiffnesses[0]
+                self.output_virtual_target = outputs_ts_stiffnesses
+                timestamps = self.sparse_action_timesteps_s + action_start_time_s
+
+                self.output_virtual_target = outputs_ts_targets[:self.action_steps]
+            else:
+                pass
+
+
+            # joint_data_list = [outputs_ts_targets.tolist(), outputs_ts_stiffnesses.tolist()]
+            # flattened_data = np.concatenate(joint_data_list, axis=None).tolist()
  
-            msg = Float64MultiArray()
-            msg.data = flattened_data  # Store actual data
+            # msg = Float64MultiArray()
+            # msg.data = flattened_data  # Store actual data
 
-            msg.layout.dim.append(MultiArrayDimension(label="matrix_num", size=2, stride=len(outputs_ts_targets)*len(outputs_ts_targets[0])))  # 2 matrix
-            msg.layout.dim.append(MultiArrayDimension(label="horizon", size=len(outputs_ts_targets), stride=1))  # 6 columns
-            self.action_publisher.publish(msg)
+            # msg.layout.dim.append(MultiArrayDimension(label="matrix_num", size=2, stride=len(outputs_ts_targets)*len(outputs_ts_targets[0])))  # 2 matrix
+            # msg.layout.dim.append(MultiArrayDimension(label="horizon", size=len(outputs_ts_targets), stride=1))  # 6 columns
+            # self.action_publisher.publish(msg)
 
+            pose_for_publish = self.output_virtual_target[self.publish_step_counter]
+
+            print("outputs_ts_targets: ", pose_for_publish)
+            
+            pose_stamped = PoseStamped()
+            # 1) Header
+            # Set the timestamp to the current time (or any valid rospy.Time)
+            pose_stamped.header.frame_id = "panda_link0"
+
+            # 2) Pose
+            # position
+            pose_stamped.pose.position.x = pose_for_publish[0]
+            pose_stamped.pose.position.y = pose_for_publish[1]
+            pose_stamped.pose.position.z = pose_for_publish[2]
+
+            # orientation (as quaternion)
+            pose_stamped.pose.orientation.x = pose_for_publish[3]
+            pose_stamped.pose.orientation.y = pose_for_publish[4]
+            pose_stamped.pose.orientation.z = pose_for_publish[5]
+            pose_stamped.pose.orientation.w = pose_for_publish[6]
+            self.action_publisher.publish(pose_stamped)
+            self.publish_step_counter += 1
 
 def main():
     rospy.init_node('online_running')
